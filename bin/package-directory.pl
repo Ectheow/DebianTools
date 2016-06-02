@@ -14,17 +14,19 @@ use v5.22;
 my $MAINTAINER = 'John Phillips <john.phillips5@hpe.com>';
 my $ORIGIN = 'HPE';
 my $REQUESTOR = 'Terry Rudd <terry.rudd@hpe.com>';
-my $HPE_VERSION_ADD = "+hpelinux0";
+my $HPE_VERSION_ADD = "+hpelinux1";
 my $CHANGELOG_MESSAGE = "Update changelog for inclusion in HPElinux cattleprod repo";
 my $SOURCE_ORIGIN = "Upstream";
 my $REPO = "hpelinux";
-
 
 my %control_fields = (
     Maintainer=>$MAINTAINER,
     Origin=>$ORIGIN,
     "XS-Source-Origin"=>$SOURCE_ORIGIN,
-    "XS-Requestor"=> $REQUESTOR);
+    "XS-Requestor"=> $REQUESTOR,
+    "Vcs-Browser"=> " ",
+    "Vcs-Git" => " ",
+);
 
 my %move_control_fields = (
     "Maintainer"=>"XSBC-Original-Maintainer",
@@ -32,50 +34,27 @@ my %move_control_fields = (
 
 sub edit_control {
     my %args = (
-        control_filename=>undef,
+        pkg_obj=>undef,
         @_,
     );
-    my @save_lines;
-    unless(defined $args{control_filename}) {
-        croak "Need a control filename to edit!";
-    }
+    (my $cntrl = $args{pkg_obj}->get_control_file())
+        or return undef;
 
-    open my $fh, "<", $args{control_filename};
-
-    while(<$fh>) {chomp; last if /^$/; };
-    push @save_lines, "\n";
-    while(my $line = <$fh>) {
-        push @save_lines, $line;
-    }
-
-    close $fh;
-
-    my $cntrl = Dpkg::Control->new();
-
-    $cntrl->load($args{control_filename})
-        or croak "Can't load control file";
-
-    foreach my $key (keys %{$cntrl}) {
+    my $tp_control = $cntrl->source_control();
+    foreach my $key (keys %{$tp_control}) {
         if (exists $move_control_fields{$key}) {
-            $cntrl->{$move_control_fields{$key}} = 
-                $cntrl->{$key};
+            $tp_control->{$move_control_fields{$key}} = 
+                $tp_control->{$key};
         }
     }
 
     foreach my $key (keys %control_fields)  {
-        $cntrl->{$key} = $control_fields{$key};
+        $tp_control->{$key} = $control_fields{$key};
     }
 
-    $cntrl->save($args{control_filename})
-        or croak "can't save control file";
-
-    open $fh, ">>", $args{control_filename};
-
-    print $fh @save_lines;
-    close $fh;
+    $cntrl->save() or return undef;
 
     return 1; 
-
 }
 
 sub untar_archive {
@@ -112,29 +91,33 @@ sub untar_archive {
 
 sub edit_changelog {
     my %args = (
-        changelog_name=>undef,
+        pkg_obj=>undef,
         @_
     );
+    my $entry = Debian::ChangelogEntry->new(
+        package=>$args{pkg_obj},
+        distribution=>"cattleprod",
+        urgency=>"medium",
+        changes=>["Update for HPELinux repo inclusion"],
+        author=>$MAINTAINER,
+        date=> undef);
 
-    my $dir = getcwd;
-    my $changelog = Dpkg::Changelog::Debian->new();
+#    chdir dirname($args{changelog_name} . "../" );
+#
+#    system("dch --newversion "
+#        . $version . $HPE_VERSION_ADD
+#        . " -D cattleprod "
+#        . $CHANGELOG_MESSAGE) == 0
+#        or croak "Can't edit changelog: $args{changelog_name} $!";
+#
+    #chdir $dir;
+    #
+    $args{pkg_obj}->append_changelog_entry(entry=>$entry) or do {
+        carp "Can't append changelog entry";
+        return undef;
+    };
 
-    $changelog->load($args{changelog_name})
-        or croak "Can't load changelog";
-
-    my $latest = $changelog->[0];
-    my $version = $latest->get_version();
-
-    chdir dirname($args{changelog_name} . "../" );
-
-    system("dch --newversion "
-        . $version . $HPE_VERSION_ADD
-        . " -D cattleprod "
-        . $CHANGELOG_MESSAGE) == 0
-        or croak "Can't edit changelog: $args{changelog_name} $!";
-
-    chdir $dir;
-    return $version . $HPE_VERSION_ADD;
+    return 1;
 }
 
 sub dput_changes {
@@ -151,6 +134,17 @@ sub dput_changes {
         carp "Can't dput";
         return undef;
     };
+}
+
+sub save_debian {
+
+}
+
+sub extract_debian {
+    my ($self, %opts) = @_;
+
+    if ($self->get_)) {
+    }
 }
 sub build_source {
     my %args = (
@@ -177,21 +171,57 @@ sub build_source {
     return $dsc_filename =~ s/\.dsc/_amd64\.changes/r;
 }
 
-sub add_watch {
-    my %args = (
-        source_dir=>undef,
+
+sub override_lintian {
+    my %opts = (
+        pkg_obj => undef,
         @_,
     );
 
-    open my $fh, ">", $args{source_dir} . "debian/watch";
+    my $count=0;
+    $opts{pkg_obj}->extract_orig() 
+        or do {
+        carp "Can't extract orig";
+        return undef;
+    };
 
-    say $fh "";
+    my $binary_arts = $opts{pkg_obj}->binary_artifacts();
 
-    close $fh;
-    return 1;
-}
+    foreach my $artifact (@$binary_arts) {
+        if (not (-f $artifact)) {
+            carp "ARtifact: $artifact undefined";
+            next;
+        }
 
-sub override_lintian {
+        open my $lintian, "-|", "lintian $artifact" or do {
+            carp "can't run lintian for $artifact";
+        };
+
+        while(<$lintian>) {
+            if(/^E.*$/) {
+                my (undef, $package, $error) = split /:\s*/, $_;
+                $error = (split /\s+/, $error)[0];
+                $opts{pkg_obj}->override_lintian(
+                    packages=>{$package=>[$error]}) > 0 or do {
+                    return 0;
+                };
+                print "Overriding $error for $package\n" if /^E.*$/;
+                ++$count;
+            }
+        }
+    }
+
+    $opts{pkg_obj}->save_source_orig() 
+        or do {
+        carp "can't save source orig";
+        return undef;
+    };
+    $opts{pkg_obj}->generate_source_artifacts()
+        or do {
+        carp "Can't generate source artifacts";
+        return undef;
+    };
+    return $count;
 }
 
 my $pkg_orig = shift;
@@ -203,19 +233,26 @@ my $changes = undef;
 chdir dirname $pkg_orig;
 my $pkg = Debian::Package->new(orig_tar=>basename $pkg_orig);
 
+$pkg->extract_orig() 
+    or croak "Can't extract the orig tarball";
+$pkg->extract_debian()
+    or croak "Can't extract debian tarball";
 
-my $watch_fh = $pkg->get_watch();
-add_watch(watch_filehandle=>$watch_fh)
-    or croak "Couldn't edit watch file.";
+$version = $pkg->debian_version() 
+    or croak "Can't get debian version";
+$pkg->debian_version($version . "+hpelinux0");
+$pkg->distribution("cattleprod");
+$pkg->set_watch(text=>"\n") 
+    or croak "Can't set watch text";
 
-($version = edit_changelog(changelog_name => (join "/", ($source_dir, "debian", "changelog"))))
+edit_control(pkg_obj=>$pkg) 
+    or croak "Can't edit control file";
+
+edit_changelog(pkg_obj=>$pkg)
     or croak "can't edit changelog";
 
-# Get a control file object and edit it.
-my $control_obj = $pkg->get_control_file()
-    or croak "Control object not defined";
-edit_control(control_object=>$control_obj)
-    or croak "Control object editing failed";
+$pkg->save_debian()
+    or croak "Can't save orig tarball";
 
 $pkg->generate_source_artifacts()
     or croak "Can't generate source artifacts";
@@ -226,12 +263,10 @@ if (not -f $pkg->get_artifact_name(suffix=>".dsc")) {
 $pkg->build()
     or croak "Couldn't build";
 
+while(override_lintian(pkg_obj=>$pkg) > 0) {
+    $pkg->build() 
+        or croak "Can't build package";
+}
 
-$pkg->dput_to(server=>"hpelinux");
+$pkg->dput_to(server=>"hpelinux")
     or croak "Couldn't dput .changes file";
-
-($changes = build_source(source_archive=>$pkg_orig,
-             version=>$version))
-    or croak "can't build source";
-dput_changes(changes_file=>$changes) 
-    or croak "Can't put changes file: $changes";
