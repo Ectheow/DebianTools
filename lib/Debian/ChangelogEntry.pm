@@ -1,7 +1,7 @@
 package Debian::ChangelogEntry;
 use Carp;
 use Cwd;
-use Debian::Package;
+use Debian::SourcePackage;
 use v5.22;
 
 our $CHANGELOG_INDENT="  ";
@@ -19,7 +19,7 @@ sub new {
     };
 
     chomp $self->{date};
-    if (defined $self->{package} and not $self->{package}->isa("Debian::Package")) {
+    if (defined $self->{package} and not $self->{package}->isa("Debian::SourcePackage")) {
         carp "I need a debian package in the package paramenter";
         return undef;
     }

@@ -1,0 +1,96 @@
+Build loop:
+    Have:
+        orig.tar
+        .deb
+    Need:
+        - change the changes file for hpelinux automatically
+        - Change the control file for hpelinux automatically
+        - Modify original source for lintian errors manually 
+        - .changes, .dsc, orig.tar, .deb generated from pbuilder.
+    Possible algorithm:
+
+    While we haven't gotten a sucessful build:
+        if the dsc exists already:
+            dpkg-extract
+        else:
+            Extract the orig.tar
+            Make automatic edits to changelog
+            Make automatic edits to control file
+
+        Make manual edits as needed.
+        Generate source
+
+        Attempt a build
+
+        if the build succeeded:
+            run lintian, find errors, override
+        else:
+            pause, wait to exit or continue (maybe make manual edits)
+    end
+Dependency graph:
+    Have:
+        orig.tar - control file within, so:
+        Binary package dependencies.
+    Need:
+        - Graph of dependencies, so I can find a node with no dependencies within
+        the OFED. 
+
+        - So I also need, in addition, a set of binary packages within
+        the OFED.
+
+    Data structures:
+        Binary Package - 
+            A binary package has a 
+                name
+                maybe a versio number
+                Parent source package
+        Source Package:
+            A source package has a
+                name
+                version number
+                Children binary packages
+                List of other source package dependencies. (edges)
+        Package set:
+            A set of binary packages, a list.
+    
+    Possible algorithm:
+        Pass one:
+            Create a set of packages within the OFED.
+            This is a list of binary packages. Each binary package will have a
+            parent source package.
+        Pass two:
+            Create edges between the binary packages. 
+            For each source package:
+                Read the build-depends list.
+                For each binary package:
+                    if Is this binary package a a dependency of the source package?
+                        Create a directed edge for all binary packages in this
+                        package to the parent source package of this binary package.
+                        
+                        This only means adding the parent source package of this
+                        binary package to the outer source package's package dependency array.
+                    else
+                        continue
+            endfor
+        Pass three:
+            While not all source packages are built:
+
+                take a count of the built packages list.
+
+                For each source package:
+                    if this source package has a zero-length dependency array:
+                        build it, if successfull, add it to the built-packages
+                        list.
+                        break.
+                    otherwise:
+                        for each source package in the dependency list:
+                            See if it's built. If it is not, break.
+                    We haven't broken yet, this means we've a package with
+                    dependencies, but which are all built. Build the package. Add it to the list of
+                    built-packages. 
+                endfor
+                
+                Take a count of built-packages list. If it hasn't changed, exit
+                with error.
+            Endwhile
+        Done

@@ -6,7 +6,7 @@ use Carp;
 use autodie;
 use Cwd;
 use Dpkg::Changelog::Debian;
-use Debian::Package;
+use Debian::SourcePackage;
 use strict;
 use warnings;
 use v5.22;
@@ -16,7 +16,7 @@ my $ORIGIN = 'HPE';
 my $REQUESTOR = 'Terry Rudd <terry.rudd@hpe.com>';
 my $HPE_VERSION_ADD = "+hpelinux1";
 my $CHANGELOG_MESSAGE = "Update changelog for inclusion in HPElinux cattleprod repo";
-my $SOURCE_ORIGIN = "Upstream";
+my $SOURCE_ORIGIN = "upstream";
 my $REPO = "hpelinux";
 
 my %control_fields = (
@@ -24,8 +24,8 @@ my %control_fields = (
     Origin=>$ORIGIN,
     "XS-Source-Origin"=>$SOURCE_ORIGIN,
     "XS-Requestor"=> $REQUESTOR,
-    "Vcs-Browser"=> " ",
-    "Vcs-Git" => " ",
+    "Vcs-Browser"=> "http://www.mellanox.com/page/products_dyn?product_family=26&mtag=linux_sw_drivers",
+    "Vcs-Git" => "http://git.openfabrics.org/",
 );
 
 my %move_control_fields = (
@@ -49,7 +49,15 @@ sub edit_control {
     }
 
     foreach my $key (keys %control_fields)  {
-        $tp_control->{$key} = $control_fields{$key};
+
+        $tp_control->{$key} = do {
+            if (not defined $control_fields{$key}) {
+                printf "Give a value for field '%s': >", $key;
+                <STDIN>;
+            } else {            
+                $control_fields{$key};
+            }
+        };
     }
 
     $cntrl->save() or return undef;
@@ -77,7 +85,43 @@ sub untar_archive {
     }
 }
 
-#sub generate_source_artifacts {
+sub add_lintian_to_rules {
+    my %args = (
+        pkg_obj=>undef,
+        @_,
+    );
+
+    my $binary = 0;
+    my $dh_lintian = 0;
+    if (not defined $args{pkg_obj}) {
+        return undef;
+    }
+
+    open my $fh, "+<", $args{pkg_obj}->debian_dir_name() . "/rules" or do {
+        carp "can't open debian/rules";
+        return undef;
+    };
+
+    while(<$fh>) {
+        if(/^binary\-arch:/) {
+            $binary = 1;
+        } elsif (/^\S/) {
+            $binary = 0;
+        }
+
+        if ($binary and m/dh_lintian/) {
+            say "Has dh_lintian";
+            $dh_lintian = 1;
+        }
+    }
+
+    if (not $dh_lintian) {
+        say "No DH lintian";
+    }
+    return $dh_lintian;
+}
+
+#sub source_build {
 #    my %args = (
 #        source_dir=>undef,
 #        @_,
@@ -101,7 +145,10 @@ sub edit_changelog {
         changes=>["Update for HPELinux repo inclusion"],
         author=>$MAINTAINER,
         date=> undef);
-
+    if (not defined $entry) {
+        carp "Undefined entry for changelog, couldn't construct";
+        return undef;
+    }
 #    chdir dirname($args{changelog_name} . "../" );
 #
 #    system("dch --newversion "
@@ -140,12 +187,6 @@ sub save_debian {
 
 }
 
-sub extract_debian {
-    my ($self, %opts) = @_;
-
-    if ($self->get_)) {
-    }
-}
 sub build_source {
     my %args = (
         source_archive=>undef,
@@ -179,12 +220,6 @@ sub override_lintian {
     );
 
     my $count=0;
-    $opts{pkg_obj}->extract_orig() 
-        or do {
-        carp "Can't extract orig";
-        return undef;
-    };
-
     my $binary_arts = $opts{pkg_obj}->binary_artifacts();
 
     foreach my $artifact (@$binary_arts) {
@@ -211,16 +246,12 @@ sub override_lintian {
         }
     }
 
-    $opts{pkg_obj}->save_source_orig() 
-        or do {
-        carp "can't save source orig";
-        return undef;
-    };
-    $opts{pkg_obj}->generate_source_artifacts()
+    $opts{pkg_obj}->source_build()
         or do {
         carp "Can't generate source artifacts";
         return undef;
     };
+
     return $count;
 }
 
@@ -231,42 +262,72 @@ my $version = undef;
 my $changes = undef;
 
 chdir dirname $pkg_orig;
-my $pkg = Debian::Package->new(orig_tar=>basename $pkg_orig);
+my $pkg = Debian::SourcePackage->new(orig_tar=>basename $pkg_orig);
 
-$pkg->extract_orig() 
-    or croak "Can't extract the orig tarball";
-$pkg->extract_debian()
-    or croak "Can't extract debian tarball";
+sub make_control_edits {
+    
+    my %args = (
+        pkg_obj=>undef,
+        @_);
 
-$version = $pkg->debian_version() 
-    or croak "Can't get debian version";
-$pkg->debian_version($version . "+hpelinux0");
-$pkg->distribution("cattleprod");
-$pkg->set_watch(text=>"\n") 
-    or croak "Can't set watch text";
+    $version = $pkg->debian_version() 
+        or croak "Can't get debian version";
+    $pkg->debian_version($version . $HPE_VERSION_ADD);
+    $pkg->distribution("cattleprod");
+    $pkg->set_watch(text=>"\n") 
+        or croak "Can't set watch text";
 
-edit_control(pkg_obj=>$pkg) 
-    or croak "Can't edit control file";
+    edit_control(pkg_obj=>$args{pkg_obj}) 
+        or croak "Can't edit control file";
 
-edit_changelog(pkg_obj=>$pkg)
-    or croak "can't edit changelog";
+    edit_changelog(pkg_obj=>$args{pkg_obj})
+        or croak "can't edit changelog";
 
-$pkg->save_debian()
-    or croak "Can't save orig tarball";
-
-$pkg->generate_source_artifacts()
-    or croak "Can't generate source artifacts";
-if (not -f $pkg->get_artifact_name(suffix=>".dsc")) {
-    croak "dsc build artifact doesn't exist";
+    return 1;
 }
 
-$pkg->build()
-    or croak "Couldn't build";
+sub main {
 
-while(override_lintian(pkg_obj=>$pkg) > 0) {
-    $pkg->build() 
-        or croak "Can't build package";
+    my $pkg = shift;
+    my $success = 0;
+    while(not $success) {
+        if (-f $pkg->get_artifact_name(suffix=>".dsc")) {
+            $pkg->source_extract()
+                or croak "Can't extract source";
+        } else {
+            $pkg->extract_all()
+                or croak "Can't extract orig tarball";
+            make_control_edits(pkg_obj=>$pkg);
+        }
+
+        wait_for_manual_edits() 
+            or do {
+            carp "Quitting";
+            return 0;
+        };
+        $pkg->source_build()
+            or croak "Can't build source";
+        $pkg->build()
+            or croak "Can't build binary package";
+
+        if (override_lintian(pkg_obj=>$pkg) == 0) {
+            $success = 1;
+        }
+
+    }
+    
+    return 1;
 }
 
-$pkg->dput_to(server=>"hpelinux")
+sub wait_for_manual_edits()
+{
+    print "> ";
+    while(<STDIN>) {
+        chomp;
+        return 1 if /^continue$/;
+        return 0 if /^quit$/;
+    }
+}
+
+main($pkg) and $pkg->dput_to(server=>"hpelinux")
     or croak "Couldn't dput .changes file";

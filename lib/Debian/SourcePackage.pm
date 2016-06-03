@@ -1,4 +1,4 @@
-package Debian::Package;
+package Debian::SourcePackage;
 use Carp;
 use autodie;
 use Cwd;
@@ -58,8 +58,6 @@ Parses the changelog for the package. Requires that the orig_tar or a debian tar
 archive exists. Returns a Dpkg::Changelog object.
 
 =cut
-
-
 sub parse_changelog {
     my ($self, %args) = @_;
 
@@ -88,9 +86,16 @@ sub read_version_from_changelog {
 
     return 1;
 }
+
+
+=item $result = $p->extract_orig();
+
+Extracts the orig tarball.
+
+=cut
 sub extract_orig {
     my $self = shift;
-    my $source_orig = $self->get_orig_name();
+    my $source_orig = $self->orig_tar_name();
 
     if (not -f $source_orig) {
         carp "No source orig: $source_orig";
@@ -110,16 +115,111 @@ sub extract_orig {
     return $files[0]->name();
 
 }
+sub source_extract {
+    my $self = shift;
 
-=item $dirname = $p->get_source_dir()
+    my $dsc_file = $self->get_artifact_name(suffix=>".dsc")
+        or do {
+        carp "can't get dsc artifact";
+        return undef;
+    };
 
-Get name of the source directory that may or may not be extracted. If it isn't, returns undef. Call extract_orig first.
+    system("dpkg-source -x $dsc_file") == 0 or do {
+        carp "Can't extract $dsc_file";
+        return undef;
+    };
+
+    return 1;
+}
+
+=item $result = $p->extract_all();
+
+Extracts both the orig tarball and the debian tarball directory (if it exists).
+Returns 1 on success, undef on failure. 
 
 =cut
-sub get_source_dir {
+sub extract_all {
     my ($self, %opts) = @_;
 
-    my $source_orig = $self->get_orig_name();
+
+    $self->extract_orig() or do {
+        carp "Failure extracting orig archive";
+        return undef;
+    }; 
+    $self->extract_debian() or do {
+        carp "Failure while extracting debian archive";
+        return undef;
+    };
+    return 1;
+}
+
+=item $result = $p->extract_debian();
+
+Extracts the debian tarball into the correct directory. 1 on success, undef on
+failure. If the debian directory doesn't exist this isn't counted as a failure.
+It _is_ a failure if the orig doesn't already exist untarred.
+
+=cut 
+sub extract_debian {
+    my ($self, %opts) = @_;
+    
+    my $source_orig = $self->orig_tar_name();
+    my $debian_tar = $self->debian_tar_name();
+
+    
+    if (not -f $source_orig) {
+        carp "The source orig: $source_orig should already exist, but it doesn't";
+        return undef;
+    }
+
+    if (not defined $debian_tar or not -f $debian_tar) {
+        say "The tarball: $debian_tar doesn't exist, which may be OK, so skipping...";
+        return 1;
+    }
+
+    if (not -d $self->source_dir()) {
+        say "The source dir for $debian_tar doesn't exist";
+        return undef;
+    }
+
+    my $tar = Archive::Tar->new();
+
+    $tar->read($debian_tar) or do {
+        carp "Can't read debian archive: $debian_tar";
+        return undef;
+    };
+
+
+    my @files = $tar->extract();
+
+    if(not scalar @files) {
+        carp "Extraction of debian archive $debian_tar failed";
+        return undef;
+    }
+
+    return $files[0];
+}
+
+=item $result = $p->save_all();
+
+Creates from the source directory the debian and orig tarballs, overwriting if
+they exist.  Returns 1 on success, undef on failure.
+
+=cut 
+sub save_all {
+}
+
+
+=item $dirname = $p->source_dir()
+
+Get name of the source directory that may or may not be extracted. If it isn't,
+returns undef. Call extract_orig first.
+
+=cut
+sub source_dir {
+    my ($self, %opts) = @_;
+
+    my $source_orig = $self->orig_tar_name();
 
     if (not defined $source_orig) {
         carp "Can't find orig source tarball";
@@ -135,13 +235,24 @@ sub get_source_dir {
 
 }
 
-sub save_source_orig {
-    my $self = shift;
+sub save_tar {
+    my ($self, %opts) = @_;
     my @files = ();
+
+    my ($dir, $dest) = ($opts{directory}, $opts{destination});
+    if (not defined $dir) {
+        carp "Undefined file";
+        return undef;
+    }
+
+    if (not defined $dest) {
+        carp "Undefined destination for tar";
+        return undef;
+    }
 
     find(
         sub { push @files, $File::Find::name; }, 
-        $self->get_source_dir());
+        $dir);
 
     if (not scalar @files) {
         carp "No files in source directory";
@@ -152,6 +263,7 @@ sub save_source_orig {
         local $,="\n";
         say "Adding ", @files, " to archive";
     };
+
     my $tar = Archive::Tar->new();
     my $fh = undef;
     $tar->add_files(@files)
@@ -159,30 +271,44 @@ sub save_source_orig {
         carp "Can't add files: " . @files;
         return undef;
     };
-    switch ($self->get_orig_name()) {
-        case m/.*\.gz$/i { $fh = IO::Zlib->new($self->get_orig_name(), "wb"); }
-        case m/.*\.xz$/i { $fh = new IO::Compress::Xz $self->get_orig_name(); }
-        else { open $fh, ">", $self->get_orig_name(); }
+
+    switch ($self->orig_tar_name()) {
+        case m/.*\.gz$/i { $fh = IO::Zlib->new($dest, "wb"); }
+        case m/.*\.xz$/i { $fh = new IO::Compress::Xz $dest; }
+        else { open $fh, ">", $dest; }
     };
 
     if(not defined $fh) {
-        carp "Can't open filehandle to " . $self->get_orig_name() . " for writing";
+        carp "Can't open filehandle to " . $dest . " for writing";
         return undef;
     }
 
     return scalar $tar->write($fh);
 }
 
-=item $is_ok = $p->generate_source_artifacts()
-
-Generates source artifacts for the package, using dpkg-source.
-Returns success = 1 or failure = undef.
-
-=cut
-sub generate_source_artifacts {
+sub save_source_orig {
     my ($self, %opts) = @_;
 
-    my $source_dir = $self->get_source_dir();
+    return $self->save_tar(directory=>$self->source_dir(), 
+                           destination=>$self->orig_tar_name());
+}
+
+sub save_debian {
+    my ($self, %opts) = @_;
+
+    return $self->save_tar(directory=>$self->source_dir() . "/debian",
+                           destination=>$self->debian_tar_name());
+}
+
+=item $is_ok = $p->source_build()
+
+Dpkg-source builds the source directory.
+
+=cut
+sub source_build {
+    my ($self, %opts) = @_;
+
+    my $source_dir = $self->source_dir();
 
     if (not defined $source_dir) {
         carp "Can't find or generate orig source";
@@ -203,12 +329,12 @@ sub generate_source_artifacts {
 }
 
 
-=item $filename = $p->get_orig_name()
+=item $filename = $p->orig_tar_name()
 
 Gets the filename for the orig tarball.
 
 =cut 
-sub get_orig_name {
+sub orig_tar_name {
     my $self = shift;
 
     my $root = $self->{package_name}
@@ -216,7 +342,9 @@ sub get_orig_name {
     . $self->{upstream_version}
     . ".orig.tar";
 
-    if (-f $root . ".gz" ) {
+    if (-f $root) {
+        return $root;
+    } elsif (-f $root . ".gz" ) {
         return $root . ".gz";
     } elsif(-f $root . ".xz") {
         return $root . ".xz";
@@ -225,6 +353,34 @@ sub get_orig_name {
         return undef;
     }
 }
+
+
+sub debian_tar_name {
+    my $self = shift;
+
+    my @suffixes = (".debian.tar", ".diff");
+    my @compressions = (".gz", ".xz");
+
+    foreach my $suffix (@suffixes) {
+        my $root = sprintf("%s_%s%s", $self->name(), $self->version(), $suffix);
+        foreach my $compression (@compressions) {
+            my $fname = $root . $compression;
+            if (-f $fname) {
+                return $fname;
+            }
+        }
+    }
+
+    return undef;
+}
+
+
+sub debian_dir_name {
+    my $self = shift;
+
+    return $self->source_dir(). "/debian";
+}
+
 
 sub __get_deb_names {
     my ($self, %opts) = @_;
@@ -274,7 +430,7 @@ sub get_artifact_name {
 sub __get_debian_file {
     my ($self, $name) = @_;
 
-    return join "/", ($self->get_source_dir(), "debian", $name);
+    return join "/", ($self->source_dir(), "debian", $name);
 
 }
 
@@ -377,53 +533,17 @@ sub append_changelog_entry {
     return 1; 
 }
 
-#sub control_file_save {
-#    my ($self, %opts) = @_;
-#    my @save_lines = undef;
-#
-#    unless (defined $opts{control_file_hash}) {
-#        carp "I need a control file hash";
-#        return undef;
-#    }
-#
-#    unless($opts{control_file_hash}->isa("Dpkg::Control")) {
-#        carp "I need a dpkg control object";
-#        return undef;
-#    }
-#
-#    #open my $ctrl_fh, "<", $self->__checked_get_debian_file("control");
-#
-#    #while(<$ctrl_fh>) { chomp; last if $_ eq ""; }
-#
-#    #@save_lines = <$ctrl_fh>;
-#    #unshift @save_lines, "\n";
-#
-#    #close $ctrl_fh;
-#
-#    $opts{control_file_hash}->save($self->__checked_get_debian_file("control"))
-#        or do {
-#        carp "Can't save control file hash";
-#        return undef;
-#    };
-#
-#    #open $ctrl_fh, ">>", $self->__checked_get_debian_file("control")
-#    #    or do {
-#    #    carp "Can't open control file";
-#    #    return undef;
-#    #};
-#
-#    #print $ctrl_fh @save_lines;
-#
-#    #close $ctrl_fh;
-#
-#    return 1;
-#}
-
 sub build {
     my ($self, %opts) = @_;
 
     system("sudo /usr/sbin/pbuilder --build --debbuildopts '-j -sa' --buildresult . " . $self->get_artifact_name(suffix=>".dsc")) == 0 or do {
         carp "Couldn't run pbuilder, got a non-zero result.";
+        return undef;
+    };
+
+    say "dsc; " . $self->get_artifact_name(suffix=>".dsc");
+    system("dpkg-source -x " . $self->get_artifact_name(suffix=>".dsc")) == 0 or do {
+        carp "Can't re-extract source";
         return undef;
     };
 
@@ -564,12 +684,6 @@ sub binary_artifacts {
     return $file_strings;
 }
 
-
-sub save {
-    my ($self, %opts) = @_;
-
-     
-}
 =back
 =cut
 1;
