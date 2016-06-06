@@ -16,6 +16,7 @@ use IO::Compress::Xz;
 use IO::Zlib;
 use File::Spec;
 use v5.22;
+use parent 'Debian::Package';
 
 =head1
 
@@ -25,30 +26,58 @@ Package for manipulating a debian package's files.
 sub new {
     my $class = shift;
 
+    my $self = $class->SUPER::new(
+        extract_state => 0,
+        build_dependencies => [],
+        orig_tar => undef,
+        @_);
+
+    if (defined $self->{orig_tar}) {
+        $self->init_from_orig
+            or do {
+            carp "Can't initialize source package";
+            return undef;
+        };
+    }
+
+    return $self;
+}
+
+=head
+=over4
+=item $p->init_from_orig()
+
+Initialize the source package from an un-extracted orig tarball.
+
+=cut
+sub init_from_orig 
+{
+    my $self = shift;
+    if (not -f $self->{orig_tar}) {
+        carp "The provided orig tarball doesn't exist.";
+        return undef;
+    }
+
     my $package_regex = qr{
     ([\w\d\-]+)
     _
     ([\w\d\.]+)
     \.orig.*
     }xi;
-    my %args = (
-        orig_tar=>undef,
-        @_,
-    );
-    my $self = {
-        package_name => undef,
-        upstream_version => undef,
-        debian_version => undef,
+
+    $self->{orig_tar} =~ m/$package_regex/;
+    $self->{package_name} = $1;
+    $self->{upstream_version} = $2;
+
+
+    $self->extract_orig
+        or do {
+        carp "Can't extract orig tarball";
+        return undef;
     };
+    $self->{extract_state} = 1;
 
-
-    if (defined $args{orig_tar}) {
-        $args{orig_tar} =~ m/$package_regex/;
-        $self->{package_name} = $1;
-        $self->{upstream_version} = $2;
-    }
-
-    return bless $self, $class;
+    1
 }
 
 =over 4
@@ -115,6 +144,7 @@ sub extract_orig {
     return $files[0]->name();
 
 }
+
 sub source_extract {
     my $self = shift;
 
@@ -548,56 +578,6 @@ sub build {
     };
 
     return 1;
-}
-
-sub debian_version {
-    my ($self, $arg) = @_;
-
-    if (defined $arg) {
-        $self->{debian_version} = $arg;
-    }
-
-    if (not defined $self->{debian_version}) {
-        $self->read_version_from_changelog() or do {
-            carp "Can't read version from changelog";
-        };
-    }
-
-    return $self->{debian_version};
-}
-
-sub distribution {
-    my ($self, $arg) = @_;
-
-   if (defined $arg) {
-       $self->{distribution} = $arg;
-   } 
-
-   return $self->{distribution};
-}
-
-sub version {
-    my ($self, $arg) = @_;
-
-    
-    if (defined $arg) {
-        my ($deb, $up) = split "-", $arg;
-        $self->debian_version($deb);
-        $self->upstream_version($up);
-    }
-
-    return join "-", ($self->{upstream_version}, $self->{debian_version});
-}
-
-sub name {
-    my ($self, $arg) = @_;
-
-    if (defined $arg) {
-        carp "Tried to set name of package, isn't supported";
-        return undef;
-    }
-
-    return $self->{package_name};
 }
 
 sub dput_to {

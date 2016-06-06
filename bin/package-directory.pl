@@ -121,18 +121,6 @@ sub add_lintian_to_rules {
     return $dh_lintian;
 }
 
-#sub source_build {
-#    my %args = (
-#        source_dir=>undef,
-#        @_,
-#    );
-#
-#    system("dpkg-source --build $args{source_dir}") == 0
-#        or croak "Can't create build source artifacts";
-#
-#    return 1;
-#}
-
 sub edit_changelog {
     my %args = (
         pkg_obj=>undef,
@@ -181,10 +169,6 @@ sub dput_changes {
         carp "Can't dput";
         return undef;
     };
-}
-
-sub save_debian {
-
 }
 
 sub build_source {

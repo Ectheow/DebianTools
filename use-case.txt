@@ -94,3 +94,6 @@ Dependency graph:
                 with error.
             Endwhile
         Done
+
+For the building, I need to add a deb repo to the pbuilder commandline first,
+and possibly update it as well, beforehand.
