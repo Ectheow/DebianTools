@@ -1,0 +1,42 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Debian::PackageManager;
+use TryCatch;
+use v5.20;
+
+
+sub main(@);
+
+main(@ARGV);
+
+sub main(@)
+{
+    my ($arg, $package_name) = @_;
+
+    my $packman = Debian::PackageManager->new();
+    try {
+        $packman->package_hash_file(glob "~/.packages");
+    }
+    catch($e)
+    {
+        die "main: Exception caught: $e"
+    }
+
+    given($arg)
+    {
+        when("list")
+        {
+            foreach my $package (@{$packman->packages})
+            {
+                say $package->source_package->name;
+            }
+        }
+        default
+        {
+            die "main: Invalid action: $arg";
+        }
+    }
+
+    1
+}

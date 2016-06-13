@@ -1,0 +1,751 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Switch;
+use Carp;
+use Debian::SourcePackage;
+use Debian::BinaryPackage;
+use Data::Dumper;
+use File::Basename;
+use Debian::Util;
+use List::MoreUtils ':all';
+use BerkeleyDB::Hash;
+use BerkeleyDB;
+use v5.20;
+
+my @binary_packages;
+my %binary_package_names;
+my @unbuilt_source_packages;
+my %source_packages;
+my @built_source_packages;
+my %pkg_depends = ();
+
+#
+# States for the package build database.
+my $CURRENT_PKG = "CURRENT_PKG";
+my $PKG_BUILT="built";
+my $PKG_CONTROL_DONE="control done";
+my $PKG_UNBUILT="unbuilt";
+my $PKG_BLACKLIST='blacklist';
+
+#
+# Constants for control files.
+my $MAINTAINER = 'John Phillips <john.phillips5@hpe.com>';
+my $ORIGIN = 'HPE';
+my $REQUESTOR = 'Terry Rudd <terry.rudd@hpe.com>';
+my $HPE_VERSION_ADD = "+hpelinux1";
+my $CHANGELOG_MESSAGE = "Update changelog for inclusion in HPElinux cattleprod repo";
+my $SOURCE_ORIGIN = "upstream";
+my $REPO = "hpelinux";
+my $WATCH_URL="http://mellanox.com/";
+my $VCS_GIT="git\@github.hpe.com:hpelinux/mlnx-ofed.git";
+my $VCS_BROWSER="https://github.hpe.com/hpelinux/mlnx-ofed";
+
+# 
+# Log level constants
+#
+my $INFO_LEVEL=3;
+my $WARN_LEVEL=2;
+my $ERR_LEVEL=1;
+my $log_level = 3;
+
+my $filename = "./pkgdb.db";
+my %control_fields = (
+    Maintainer=>$MAINTAINER,
+    Origin=>$ORIGIN,
+    "XS-Source-Origin"=>$SOURCE_ORIGIN,
+    "XS-Requestor"=> $REQUESTOR,
+    "Vcs-Browser"=>  $VCS_BROWSER,
+    "Vcs-Git" => $VCS_GIT,
+    "Xs-Upstream-Vulnerability-Management" => "https://www.mellanox.com/related-docs/prod_software/Mellanox_OFED_Linux_Release_Notes_3_3-1_0_0_0.pdf",
+);
+
+my %move_control_fields = (
+    "Maintainer"=>"XSBC-Original-Maintainer",
+);
+
+
+sub main(@);
+sub unbuild(@);
+sub log_info(@);
+sub log_err(@);
+sub log_warn(@);
+sub build_package_list_from_origs(@);
+sub build_depends_graph();
+sub build_one_package($);
+sub dump_dep_graph();
+sub dump_db();
+sub nextup($);
+my %build_states;
+my %OPTS =(
+    ignore_built => 0,
+);
+sub untie_hash
+{
+    log_warn "Caught sigterm";
+    untie %build_states;
+    exit 1;
+}
+*LOG = *STDOUT;
+*LOGERR= *STDERR;
+$SIG{INT} = \&untie_hash;
+$SIG{TERM} = \&untie_hash;
+$SIG{HUP} = \&untie_hash;
+
+if (not -f $filename)
+{
+    tie %build_states, 'BerkeleyDB::Hash',
+    -Filename => $filename,
+    -Flags => DB_CREATE;
+} 
+else
+{
+    tie %build_states, 'BerkeleyDB::Hash',
+    -Filename => $filename;
+}
+
+my $func = shift;
+my @files = ();
+
+while(my $arg = shift @ARGV)
+{
+    given($arg)
+    {
+        when(m/^\-.*$/)
+        {
+            s/^\-\-?//;
+            tr/-/_/;
+            $OPTS{$_} = shift @ARGV;
+        }
+        default
+        {
+            push @files, $_;
+        }
+    }
+}
+
+die "I need files as arguments" unless scalar @files;
+
+if ($func eq "unbuild") {
+    unbuild(@files);
+} elsif($func eq "build") {
+    main(@files);
+} elsif($func eq "dump") {
+    dump_db();
+} elsif($func eq "nextup") {
+    nextup(shift);
+} else {
+    croak "I need an argument, one of (unbuild|build|dump)";
+    exit 1;
+}
+
+untie %build_states;
+exit 0;
+
+sub main(@)
+{
+    build_package_list_from_origs(@_)
+        or die;
+    build_binary_list_from_sources()
+        or die;
+
+    {
+        local $, = "\n";
+
+        log_info "Binary packages: ";
+        log_info map {$_->binary_name } @binary_packages;
+        log_info '';
+        log_info "source packages: ";
+        log_info map { $_->name} @unbuilt_source_packages;
+    };
+    build_depends_graph()
+        or die;
+    say "Built dependency graph...";
+    dump_dep_graph();
+
+    #build_packages()
+    #or return 0;
+
+    1;
+}
+
+sub dump_db() {
+    while (my ($k, $v) = each %build_states) {
+        say $k, "==>";
+        say $v;
+        say "";
+    }
+    1
+}
+
+sub unbuild(@) {
+    my @pkgs = @_;
+
+    foreach my $pkg (@pkgs) {
+        $build_states{$pkg} = $PKG_UNBUILT;
+    }
+
+    1
+}
+
+sub nextup($) {
+    my $pkg = shift;
+
+    $build_states{$CURRENT_PKG} = $pkg;
+
+    1
+}
+
+sub dump_dep_graph()
+{
+    log_info '=' x 20;
+    foreach my $key (keys %pkg_depends) {
+        log_info "-" x 20;
+        log_info $key . ' Depends on: ';
+        if (not defined $pkg_depends{$key}) {
+            log_info "\t", "**no other packages here**";
+        } 
+        else {
+            foreach my $dep (@{$pkg_depends{$key}}) {
+                log_info "\t", $dep->name;
+            }
+        }
+    }
+    log_info '=' x 20;
+
+}
+
+sub build_package_list_from_origs(@)
+{
+    my @orig_list = @_;
+
+    foreach my $orig (@orig_list) {
+        chdir dirname $orig;
+        my $pkg = undef;
+        if (-d Debian::Util::dirname_for_orig(basename $orig)) {
+            log_info "Detected an already extracted orig: $orig -> "
+                . Debian::Util::dirname_for_orig(basename $orig);
+            $pkg = Debian::SourcePackage->new(
+                dir=>Debian::Util::dirname_for_orig(basename $orig))
+                or do {
+                carp "Package instantiation failed for $orig";
+                return undef;
+            };
+        }
+        else {
+            $pkg = Debian::SourcePackage->new(
+                orig_tar => basename $orig)
+                or do {
+                carp "Can't extract orig";
+                return undef;
+            };
+        }
+
+        push @unbuilt_source_packages, $pkg;
+        $source_packages{$pkg->name} = $pkg;
+        $pkg_depends{$pkg->name} = ();
+        log_info "added: $orig : " .  $pkg->name;
+    }
+
+    if (not scalar keys %pkg_depends) {
+        carp "Didn't actually push any source packages";
+        return undef;
+    }
+
+    1;
+}
+
+sub build_binary_list_from_sources(@)
+{
+    my @source_pkgs = @_;
+
+    foreach my $spkg (@unbuilt_source_packages) {
+        if (not $spkg->isa('Debian::SourcePackage')) {
+            carp "Source package is, for some reason, not a source package";
+            return undef;
+        }
+        my $pkgs = $spkg->binary_packages;
+        
+        push @binary_packages, @{$pkgs};
+
+        # also build a hash
+        # with package names.
+        foreach my $pkg (@$pkgs) {
+            $binary_package_names{$pkg->name} = $pkg;
+        }
+    }
+
+    if (not scalar @binary_packages) {
+        carp "Didn't push any binary packages";
+        return undef;
+    }
+
+    @binary_packages = uniq @binary_packages;
+    1
+}
+
+sub build_depends_graph()
+{
+    foreach my $spkg (@unbuilt_source_packages) {
+        my $dep_list = $spkg->build_depends;
+
+        foreach my $bin_dep (@$dep_list) {
+            my $bin_pkg = lookup_binary_pkg($bin_dep);
+            if (defined($bin_pkg)) {
+                push @{$pkg_depends{$spkg->name}}, $bin_pkg;
+            } else {
+                log_info "$bin_dep not in OFED, skipping...";
+            }
+        }
+    }
+
+    1
+}
+
+sub lookup_binary_pkg
+{
+    my $pkg_name = $_[0];
+    
+
+    $pkg_name =~ s/(\S+)\s*(?:\(.*\))/$1/g;
+    my @res = grep { $_->binary_name eq $pkg_name} @binary_packages;
+
+    if (scalar @res > 1) {
+        carp "Got too many results while looking for binary package: $pkg_name";
+        return undef;
+    }
+
+    if (not scalar @res) 
+    {
+        log_info "Didn't find any results for binary package: $pkg_name";
+        return undef;
+    }
+    return $res[0]->parent_source;
+
+}
+
+sub build_packages
+{
+    my @built = ();
+    my %unbuilt_sources_hash = ();
+    my $nbuilt = 0;
+
+    foreach my $spkg (@unbuilt_source_packages) {
+        $unbuilt_sources_hash{$spkg->name} = 1;
+    }
+
+    my $do_build = sub {
+        if(not scalar $pkg_depends{$_[0]}) {
+            my $built=0;
+            while(not $built) 
+            {
+                log_info "building: ", $source_packages{$_[0]};
+                if(not build_one_package($source_packages{$_[0]})) 
+                {
+                    log_warn "Package didn't build";
+                    given (wait_for_manual_edits())
+                    {
+                        when('continue') { ; }
+                        when('quit'    ) { last ; }
+                        when('blacklist') 
+                            { $build_states{$_[0]} = $PKG_BLACKLIST; }
+                    };
+                }
+                else 
+                {
+                    $built=1;
+                }
+                delete $unbuilt_sources_hash{$_[0]};
+            }
+            return $built;
+        } 
+        else 
+        {
+            log_info "package depends for " . $_[0] . "Is not 0";
+            0;
+        }
+    };
+
+    if (exists($build_states{$CURRENT_PKG}) and (not $build_states{ $build_states{$CURRENT_PKG} } eq $PKG_BUILT)
+        and $build_states{$CURRENT_PKG}) 
+    {
+        log_info "saved state for: ", $build_states{$CURRENT_PKG};
+        $do_build->($build_states{$CURRENT_PKG}) if exists $source_packages{$build_states{$CURRENT_PKG}};
+    }
+
+    LOOP: while(1) 
+    { 
+        $nbuilt = 0;
+        foreach my $spkg (sort keys %unbuilt_sources_hash)
+        {
+            $nbuilt++ if $do_build->($spkg);
+        }
+
+        if ($nbuilt == 0) 
+        {
+            last LOOP;
+        }
+    }
+
+    if (scalar keys %unbuilt_sources_hash) 
+    {
+        carp "There are still unbuilt source packages";
+        return undef;
+    }
+
+    return 1;
+}
+
+sub build_one_package($)
+{
+    my $pkg = shift;
+    my $success = 0;
+    my $has_control_edits = 0;
+
+    $build_states{$CURRENT_PKG} = $pkg->name;
+    # check package state.
+    if (exists $build_states{$pkg->name}) {
+        if ($build_states{$pkg->name} eq $PKG_BUILT
+                and not $OPTS{ignore_built}) 
+        {
+            log_info "Package: " . $pkg->name . " already built.";
+            return 1;
+        }
+        elsif ($build_states{$pkg->name} eq $PKG_BUILT
+                and $OPTS{ignore_built})
+        {
+            #Downgrade by one state.
+            $build_states{$pkg->name} = $PKG_CONTROL_DONE;
+        }
+        elsif($build_states{$pkg->name} eq $PKG_CONTROL_DONE) 
+        {
+            log_info "Package: " . $pkg->name . " already has control info, needs building.";
+            $has_control_edits = 1;
+        }
+        elsif($build_states{$pkg->name} eq $PKG_BLACKLIST) 
+        {
+            log_info "Package: " . $pkg->name . " is blacklisted";
+            return 1;
+        }
+    } 
+    else 
+    {
+        $build_states{$pkg->name} = $PKG_UNBUILT;
+    }
+
+    while(not $success) 
+    {
+        if (not $has_control_edits) 
+        {
+            make_control_edits(pkg_obj=>$pkg)
+                or do 
+            {
+                carp "Can't make control edits for package: ", $pkg->name;
+                return undef;
+            };
+            $has_control_edits = 1;
+            $build_states{$pkg->name} = $PKG_CONTROL_DONE;
+        }
+
+        my $result = wait_for_manual_edits();
+
+        given($result) 
+        {
+            when("continue") 
+                { ; }
+            when("blacklist") 
+                { 
+                    $build_states{$pkg->name} = $PKG_BLACKLIST;
+                    return 1;
+                }
+            when("quit") 
+                { 
+                    return undef; 
+                }
+            default 
+                { 
+                    return undef; 
+                }
+        };
+
+        $pkg->source_build()
+            or do 
+        {
+            carp "Source build failed!";
+            return undef;
+        };
+        $pkg->build()
+            or do 
+        {
+            carp "Build failed!";
+            return undef;
+        };
+
+        if (override_lintian(pkg_obj=>$pkg) == 0) 
+        {
+            last;
+        } 
+        else 
+        {
+            log_warn "The package " 
+                . $pkg->name 
+                . " still has Lintian issues";
+        }
+    }
+    $build_states{$pkg->name} = $PKG_BUILT;
+    return 1;
+}
+
+sub edit_control {
+    my %args = (
+        pkg_obj=>undef,
+        @_,
+    );
+    (my $cntrl = $args{pkg_obj}->get_control_file())
+        or return undef;
+
+    my $tp_control = $cntrl->source_control();
+    foreach my $key (keys %{$tp_control}) {
+        if (exists $move_control_fields{$key}) {
+            $tp_control->{$move_control_fields{$key}} = 
+                $tp_control->{$key};
+        }
+    }
+
+    foreach my $key (keys %control_fields)  {
+
+        $tp_control->{$key} = do 
+        {
+            if (not defined $control_fields{$key}) {
+                printf "Give a value for field '%s': >", $key;
+                <STDIN>;
+            } else {            
+                $control_fields{$key};
+            }
+        };
+    }
+
+    $cntrl->save() or return undef;
+
+    return 1; 
+}
+
+sub add_lintian_to_rules {
+    my %args = (
+        pkg_obj=>undef,
+        @_,
+    );
+
+    my $binary = 0;
+    my $dh_lintian = 0;
+    if (not defined $args{pkg_obj}) {
+        return undef;
+    }
+
+    open my $fh, "+<", $args{pkg_obj}->debian_dir_name() . "/rules" or do {
+        carp "can't open debian/rules";
+        return undef;
+    };
+
+    while(<$fh>) {
+        if(/^binary\-arch:/) {
+            $binary = 1;
+        } elsif (/^\S/) {
+            $binary = 0;
+        }
+
+        if ($binary and m/dh_lintian/) 
+        {
+            say "Has dh_lintian";
+            $dh_lintian = 1;
+        }
+    }
+
+    if (not $dh_lintian) 
+    {
+        say "No DH lintian";
+    }
+    return $dh_lintian;
+}
+
+sub edit_changelog {
+    my %args = (
+        pkg_obj=>undef,
+        @_
+    );
+    my $entry = Debian::ChangelogEntry->new(
+        package=>$args{pkg_obj},
+        distribution=>"cattleprod",
+        urgency=>"medium",
+        changes=>["Update for HPELinux repo inclusion"],
+        author=>$MAINTAINER,
+        date=> undef);
+    if (not defined $entry) {
+        carp "Undefined entry for changelog, couldn't construct";
+        return undef;
+    }
+
+    $args{pkg_obj}->append_changelog_entry(entry=>$entry) or do {
+        carp "Can't append changelog entry";
+        return undef;
+    };
+
+    return 1;
+}
+
+sub dput_changes {
+    my %args = (
+        changes_file=>undef,
+        @_,
+    );
+    unless (-f $args{changes_file}) {
+        carp "changes file DNE $args{changes_file}";
+        return undef;
+    }
+    system("dput --force $REPO $args{changes_file}") == 0 
+        or do {
+        carp "Can't dput";
+        return undef;
+    };
+}
+
+
+sub wait_for_manual_edits()
+{
+    print "> ";
+    while(<STDIN>) 
+    {
+        chomp;
+        given($_)
+        {
+            when(m/^c(ontinue)?/i) { return 'continue'; }
+            when(m/^q(uit)?$/i    ) { return 'quit'; }
+            when(m/^bl(acklist)?$/i) { return 'blacklist'; }
+        }
+        print "> ";
+    }
+}
+
+sub make_control_edits {
+    
+    my %args = (
+        pkg_obj=>undef,
+        @_);
+
+    my $pkg = $args{pkg_obj};
+    my $version = $pkg->debian_version() 
+        or croak "Can't get debian version";
+    $pkg->debian_version($version . $HPE_VERSION_ADD);
+    $pkg->distribution("cattleprod");
+    $pkg->set_watch(text=>$WATCH_URL) 
+        or croak "Can't set watch text";
+
+    edit_control(pkg_obj=>$args{pkg_obj}) 
+        or croak "Can't edit control file";
+
+    edit_changelog(pkg_obj=>$args{pkg_obj})
+        or croak "can't edit changelog";
+
+    return 1;
+}
+
+my %override_helpers = (
+    "no-copyright-file" => \&lintian_add_copyright,
+    "extended-description-is-empty" => \&lintian_add_desc,
+);
+
+sub override_lintian
+{
+    my %opts = (
+        pkg_obj => undef,
+        @_,
+    );
+
+    my $count=0;
+    my $binary_arts = $opts{pkg_obj}->binary_artifacts();
+
+    foreach my $artifact (@$binary_arts) 
+    {
+        if (not (-f $artifact)) 
+        {
+            carp "Artifact: $artifact undefined";
+            next;
+        }
+
+        open my $lintian, "-|", "lintian $artifact" 
+            or do 
+        {
+            carp "can't run lintian for $artifact";
+        };
+
+        while(<$lintian>) 
+        {
+            if(/^E.*$/) {
+                my (undef, $package, $error) = split /:\s*/, $_;
+                $error = (split /\s+/, $error)[0];
+                if (exists $override_helpers{$error}) 
+                {
+                    $override_helpers{$error}->($opts{pkg_obj});
+                } 
+                else 
+                {
+                    $opts{pkg_obj}->override_lintian(
+                        packages=>{$package=>[$error]}) > 0 
+                        or do 
+                    {
+                        log_info "No more issues found for "
+                                . $opts{pkg_obj}->name;
+                        return $count;
+                    };
+                }
+                print "Overriding $error for $package\n";
+                ++$count;
+            }
+        }
+    }
+
+    return $count;
+}
+
+
+sub lintian_add_copyright 
+{
+    my $pkg_obj = shift;
+}
+
+sub lintian_add_desc
+{
+    my $pkg_obj = shift;
+    
+    my $cntrl = $pkg_obj->get_control_file;
+
+    foreach my $pkg (@$cntrl->package_hashes) 
+    {
+        $pkg->{Description} = $pkg->{Description}
+                              . "\n " . $pkg->{Description};
+    }
+}
+
+sub log_info(@)
+{
+    if ($log_level >= $INFO_LEVEL)
+    {
+        say LOG "INFO: ", @_;
+    }
+}
+
+sub log_warn(@)
+{
+    if ($log_level >= $WARN_LEVEL)
+    {
+        say LOGERR "WARN: ", @_;
+    }
+}
+
+sub log_err(@)
+{
+    if ($log_level >= $ERR_LEVEL) 
+    {
+        say LOGERR "ERROR: ", @_;
+    }
+}

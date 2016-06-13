@@ -1,0 +1,190 @@
+#!/usr/bin/perl
+use Debian::PackageBuilder;
+use Debian::ChangelogEntry;
+use Carp;
+use File::Basename;
+use v5.20;
+#
+# Constants for control files.
+my $MAINTAINER = 'John Phillips <john.phillips5@hpe.com>';
+my $ORIGIN = 'HPE';
+my $REQUESTOR = 'Terry Rudd <terry.rudd@hpe.com>';
+my $HPE_VERSION_ADD = "+hpelinux1";
+my $CHANGELOG_MESSAGE = "Update changelog for inclusion in HPElinux cattleprod repo";
+my $SOURCE_ORIGIN = "upstream";
+my $REPO = "hpelinux";
+my $WATCH_URL="http://mellanox.com/";
+my $VCS_GIT="git\@github.hpe.com:hpelinux/mlnx-ofed.git";
+my $VCS_BROWSER="https://github.hpe.com/hpelinux/mlnx-ofed";
+
+# 
+# Log level constants
+#
+my $INFO_LEVEL=3;
+my $WARN_LEVEL=2;
+my $ERR_LEVEL=1;
+my $log_level = 3;
+
+my $filename = "./pkgdb.db";
+my %control_fields = (
+    Maintainer=>$MAINTAINER,
+    Origin=>$ORIGIN,
+    "XS-Source-Origin"=>$SOURCE_ORIGIN,
+    "XS-Requestor"=> $REQUESTOR,
+    "Vcs-Browser"=>  $VCS_BROWSER,
+    "Vcs-Git" => $VCS_GIT,
+    "Xs-Upstream-Vulnerability-Management" => "https://www.mellanox.com/related-docs/prod_software/Mellanox_OFED_Linux_Release_Notes_3_3-1_0_0_0.pdf",
+);
+
+my %move_control_fields = (
+    "Maintainer"=>"XSBC-Original-Maintainer",
+);
+
+
+sub edit_changelog($);
+sub main_build($);
+sub main_set_state($$$);
+my $orig_path=shift;
+my $func = shift // 'build';
+chdir dirname $orig_path;
+$orig_path = basename $orig_path;
+given($func)
+{
+    when("build")
+    {
+        main_build($orig_path);
+    }
+    when("set-state")
+    {
+        main_set_state($orig_path, shift, shift);
+    }
+    default
+    {
+        main_build($orig_path);
+    }
+}
+
+sub main_build($)
+{
+    my $orig_path = shift;
+
+    (my $root = $orig_path) =~ s/\.orig.*$//;
+    
+    my $builder = Debian::PackageBuilder->new(
+        orig_tarball=>$orig_path)
+        or do
+    {
+        croak "Can't intialize package builder for $orig_path";
+    };
+
+    $builder->edit_control(
+        control_fields_write=>\%control_fields,
+        control_fields_move=>\%move_control_fields)
+        or do
+    {
+        croak "Couldn't edit control info";
+    };
+
+    $builder->add_watch(
+        watch_text=>$WATCH_URL)
+        or do
+    {
+        croak "Couldn't edit watch text";
+    };
+
+    edit_changelog($builder)
+        or do
+    {
+        croak "Coudln't edit changelog";
+    };
+    
+    $builder->build_all
+        or do
+    {
+        carp "Failed first build";
+        return undef;
+    };
+
+    while((my $result = $builder->override_lintian()))
+    {
+        given($result)
+        {
+            when("try-again")
+            {
+                say "Building again to see if lintian overrides worked";
+                next;
+            }
+            when("all-clear")
+            {
+                say "Successfully overrode lintian errors";
+                last;
+            }
+            when("unoverridable-errors")
+            {
+                say "There are unoverridable errors";
+                last;
+            }
+        }
+    } continue {
+        $builder->build_all()
+            or do
+        {
+            carp "Build failed";
+            return undef;
+        };
+    };
+
+    1;
+}
+
+sub main_set_state($$$)
+{
+    my ($orig, $state_name, $state) = @_;
+    my $builder = Debian::PackageBuilder->new(
+            orig_tarball=>$orig)
+            or do
+    {
+        croak "Can't initialize builder object";
+    };
+
+    $builder->set_state($state_name=>$state)
+        or do
+    {
+        croak "Can't set state";
+    };
+}
+
+sub edit_changelog($) 
+{
+    my $pkg_obj = shift;
+    if ($pkg_obj->source_package->debian_version =~ m/.*\+hpelinux\d+$/)
+    {
+        say "already changed changelog";
+        return 1;
+    }
+    $pkg_obj->source_package->debian_version(
+        $pkg_obj->source_package->debian_version . 
+        $HPE_VERSION_ADD);
+    my $entry = Debian::ChangelogEntry->new(
+        package=>$pkg_obj->source_package,
+        distribution=>"cattleprod",
+        urgency=>"medium",
+        changes=>["Update for HPELinux repo inclusion"],
+        author=>$MAINTAINER,
+        date=> undef);
+    if (not defined $entry) {
+        carp "Undefined entry for changelog, couldn't construct";
+        return undef;
+    }
+
+    $pkg_obj->add_changelog_entry(entry=>$entry) or do 
+    {
+        carp "Can't append changelog entry";
+        return undef;
+    };
+
+    return 1;
+}
+
+1;
+
