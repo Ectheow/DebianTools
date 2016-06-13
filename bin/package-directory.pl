@@ -65,26 +65,6 @@ sub edit_control {
     return 1; 
 }
 
-sub untar_archive {
-    my %args = (
-            orig_archive=>undef,
-            @_,
-    );
-
-    unless(defined $args{orig_archive}) {
-        croak "Need orig archive";
-    } 
-
-    my $tar = Archive::Tar->new();
-    $tar->read($args{orig_archive});
-    my @files = $tar->extract();
-    if (scalar @files > 0)  {
-        return $files[0]->name();
-    } else {
-        return undef;
-    }
-}
-
 sub add_lintian_to_rules {
     my %args = (
         pkg_obj=>undef,
@@ -137,16 +117,7 @@ sub edit_changelog {
         carp "Undefined entry for changelog, couldn't construct";
         return undef;
     }
-#    chdir dirname($args{changelog_name} . "../" );
-#
-#    system("dch --newversion "
-#        . $version . $HPE_VERSION_ADD
-#        . " -D cattleprod "
-#        . $CHANGELOG_MESSAGE) == 0
-#        or croak "Can't edit changelog: $args{changelog_name} $!";
-#
-    #chdir $dir;
-    #
+
     $args{pkg_obj}->append_changelog_entry(entry=>$entry) or do {
         carp "Can't append changelog entry";
         return undef;

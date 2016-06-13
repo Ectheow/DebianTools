@@ -97,3 +97,35 @@ Dependency graph:
 
 For the building, I need to add a deb repo to the pbuilder commandline first,
 and possibly update it as well, beforehand.
+
+
+
+
+Re-specification (whatever):
+
+
+I need the build 'artifacts' from: 
+    - source build
+    - binary build
+
+    Source build:
+        - extract orig tarball
+        - do a dpkg-source -b <dir>
+    Binary build:
+        - pbuilder --build <dsc file generated>
+    
+In between:
+    Source build: 
+        Fix control information, of two classes:
+            Standard HPE add-on control fields
+            Broken package control fields.
+                missing/non-existent build-depends
+                missing dh_lintian
+                no valid clean target.
+        Fixing the first class is easy. The second is not, since pbuilder might
+        break inumerable times. I also may want to pause the whole thing for a bit.
+
+So, during the build loop, it would be nice to have the relevant data structures
+stored in a file or database to save the state of the build so what is done is
+done, what isn't isn't. This allows me to loop through re-building a package a
+number of times. 

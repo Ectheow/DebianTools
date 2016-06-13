@@ -3,19 +3,18 @@ use Carp;
 use autodie;
 use Cwd;
 use Dpkg::Control;
+use Debian::BinaryPackage;
+use parent qw[Debian::SourcePackageObject];
 use v5.22;
 
 sub new {
-    my ($class, %opts) = @_;
+    my ($class, @opts) = @_;
 
-    my $self= undef;
-    my $internal = {
-        packages=>[],
-        source_control=>undef,
-        control_filename=>$opts{control_filename},
-    };
 
-    $self =  bless $internal, $class;
+    my $self = $class->SUPER::new(
+        control_filename => undef,
+        @opts,
+    );
 
     $self->parse() or do {
         carp "Can't parse debian control info";
@@ -85,8 +84,24 @@ sub parse {
     return 1;
 }
 
-sub packages {
+sub package_hashes {
+
     return $_[0]->{packages};
+}
+sub packages {
+    my $self = $_[0];
+    my $binary_packages = [];
+
+    foreach my $package_hash (@{$self->{packages}}) {
+        push @$binary_packages, Debian::BinaryPackage->new(
+            parent_source=>$self->parent_source,
+            package_control_hash=>$package_hash)
+            or do {
+            carp "Can't initialize a package from it's control hash";
+        };
+    }
+
+    return $binary_packages;
 }
 
 sub source_control {
@@ -127,4 +142,5 @@ sub save {
 
     return 1;
 }
+
 1;

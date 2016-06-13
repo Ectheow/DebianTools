@@ -4,6 +4,7 @@ use autodie;
 use Cwd;
 use Dpkg::Changelog::Debian;
 use Dpkg::Arch qw[get_host_arch get_build_arch];
+use Dpkg::Control;
 use Debian::ChangelogEntry;
 use Debian::ControlFile;
 use strict;
@@ -15,7 +16,7 @@ use Switch;
 use IO::Compress::Xz;
 use IO::Zlib;
 use File::Spec;
-use v5.22;
+use v5.20;
 use parent 'Debian::Package';
 
 =head1
@@ -30,15 +31,38 @@ sub new {
         extract_state => 0,
         build_dependencies => [],
         orig_tar => undef,
+        dir => undef,
+        dsc_file => undef,
         @_);
 
-    if (defined $self->{orig_tar}) {
-        $self->init_from_orig
+    if (defined $self->{dsc_file})
+    {
+        $self->init_from_dsc
+            or do
+        {
+            carp "Can't initialize from dsc file "
+                . $self->{dsc_file};
+            return undef;
+        };
+    }
+    elsif (defined $self->{dir}) {
+        $self->init_from_source_dir
             or do {
+            carp "Can't initialize from source directory: "
+            . $self->{dir};
+            return undef;
+        };
+    } 
+    elsif (defined $self->{orig_tar} and not defined $self->{dir}) 
+    {
+        $self->init_from_orig
+            or do 
+        {
             carp "Can't initialize source package";
             return undef;
         };
     }
+
 
     return $self;
 }
@@ -65,19 +89,115 @@ sub init_from_orig
     \.orig.*
     }xi;
 
-    $self->{orig_tar} =~ m/$package_regex/;
-    $self->{package_name} = $1;
-    $self->{upstream_version} = $2;
+    if(not $self->{orig_tar} =~ m/$package_regex/)
+    {
+        carp "orig tar didn't match standard debian orig tar format";
+        return undef;
+    }
+    $self->name ($1);
+    $self->upstream_version ($2);
 
 
     $self->extract_orig
-        or do {
+        or do 
+    {
         carp "Can't extract orig tarball";
         return undef;
     };
+
+    $self->{extract_state} = 1;
+    $self->read_version_from_changelog
+        or do 
+    {
+        carp "Can't read verisoning info from changelog";
+        return undef;
+    };
+
+    1;
+}
+
+sub init_from_dsc
+{
+    my $self = shift;
+
+    if (not -f $self->{dsc_file})
+    {
+        carp "the provided DSC file: " . $self->{dsc_file}
+            . "Doesn't exist";
+        return undef;
+    }
+
+
+    my $dsc_file=Dpkg::Control->new();
+
+    $dsc_file->load($self->{dsc_file})
+        or do
+    {
+        carp "can't parse DSC file: " . $self->{dsc_file};
+        return undef;
+    };
+
+    $self->name($dsc_file->{Source})
+        or do
+    {
+        carp "can't set name: " . $dsc_file->{Source};
+        return undef;
+    };
+    $self->version($dsc_file->{Version})
+        or do
+    {
+        carp "Can't set version: " . $dsc_file->{Version};
+        return undef;
+    };
+
+    $self->source_extract
+        or do
+    {
+        carp "Provided with a DSC file, but couldn't extract source.";
+        return undef;
+    };
+    $self->read_version_from_changelog
+        or do
+    {
+        carp "Can't read version from changelog";
+        return undef;
+    };
+
     $self->{extract_state} = 1;
 
-    1
+    1;
+}
+sub init_from_source_dir
+{
+    my $self = shift;
+
+    if (not -d $self->{dir}) {
+        carp "The provided dir: '" . $self->{dir} . "' doesn't exist";
+        return undef;
+    }
+
+    my $dir_regex = qr{
+        ^([\w\d\-]+)
+        -
+        ([\d\.\w]+)$
+    }xi;
+
+    if (not $self->{dir} =~ m/$dir_regex/) {
+        carp "$self->{dir} doesn't match normal debian extraction name";
+        return undef;
+    }
+
+    $self->{extract_state} = 1;
+    $self->name($1);
+    $self->upstream_version($2);
+
+    $self->read_version_from_changelog
+        or do {
+        carp "Can't read versioning info from changelog";
+        return undef;
+    };
+
+    1;
 }
 
 =over 4
@@ -110,12 +230,25 @@ sub read_version_from_changelog {
 
     my $top_entry = $chng->[0];
 
-    ($self->{upstream_version}, $self->{debian_version}) = 
+    
+    my ($upv, $debv) = 
         split "-", $top_entry->get_version();
+
+
+    $self->upstream_version($upv);
+    $self->debian_version($debv);
+
+    if (not defined $self->upstream_version) {
+        carp "Can't read upstream version from changelog";
+        return undef;
+    }
+    elsif (not defined $self->debian_version) {
+        carp "Can't read debian version from changelog";
+        return undef;
+    }
 
     return 1;
 }
-
 
 =item $result = $p->extract_orig();
 
@@ -133,7 +266,11 @@ sub extract_orig {
 
     my $tar = Archive::Tar->new();
 
-    $tar->read($source_orig);
+    $tar->read($source_orig)
+        or do {
+        carp "Can't read orig tarball: $source_orig";
+        return undef;
+    };
 
     my @files = $tar->extract();
 
@@ -248,6 +385,10 @@ returns undef. Call extract_orig first.
 =cut
 sub source_dir {
     my ($self, %opts) = @_;
+
+    if (defined $self->{dir} and -d $self->{dir}) {
+        return $self->{dir};
+    }
 
     my $source_orig = $self->orig_tar_name();
 
@@ -367,9 +508,9 @@ Gets the filename for the orig tarball.
 sub orig_tar_name {
     my $self = shift;
 
-    my $root = $self->{package_name}
+    my $root = $self->name
     . "_"
-    . $self->{upstream_version}
+    . $self->upstream_version
     . ".orig.tar";
 
     if (-f $root) {
@@ -426,7 +567,8 @@ Gets the artifact name according to opts.
         '.dsc' for example, or '.changes'.
 
 =cut
-sub get_artifact_name {
+sub get_artifact_name 
+{
     my $self = shift;
 
     my %args = (
@@ -434,23 +576,27 @@ sub get_artifact_name {
         @_,
     );
 
-
-    if($args{suffix} eq ".dsc") {
-        return $self->{package_name}
+    if($args{suffix} eq ".dsc") 
+    {
+        return $self->name()
             . "_"
-            . $self->{upstream_version}
+            . $self->upstream_version()
             . "-"
-            . $self->{debian_version}
+            . $self->debian_version()
             . ".dsc";
-    } elsif($args{suffix} eq ".changes") {
+    } 
+    elsif($args{suffix} eq ".changes") 
+    {
         my $buildarch = Dpkg::Arch::get_build_arch();
-        return $self->{package_name}
+        return $self->name
             . "_"
             . $self->version()
             . "_"
             . $buildarch
             . ".changes";
-    } elsif($args{suffix} eq ".deb") {
+    } 
+    elsif($args{suffix} eq ".deb") 
+    {
         $self->__get_deb_names();
     }
 
@@ -485,7 +631,7 @@ sub get_control_file {
         return undef;
     }
     
-    my $cntrl = Debian::ControlFile->new(control_filename=>$control_filename) or do{
+    my $cntrl = Debian::ControlFile->new(control_filename=>$control_filename, parent_source=>$self) or do{
         carp "Can't parse control file";
         return undef;
     };
@@ -496,7 +642,7 @@ sub get_control_file {
 
 sub set_watch {
 
-    my ($self, %opts) =@_;
+    my ($self, %opts) = @_;
 
     unless(defined $opts{text}) {
         carp "Undefined options text";
@@ -598,38 +744,53 @@ sub dput_to {
     return 1;
 }
 
-=item $successs = $p->override_lintian(packages=>{"libfoo"=>["lintian-one", "lintian-two"], "libfoo-dev"=>["lintian-six", "lintian-seven"]});
+=item $successs = $p->override_lintian(package=>"example-package",
+                                       tag=>"example-error-tag");
     
-Override a set of lintian errors for a set of packages produced by this source
-package. Edits the debian/source/lintian-overrides file to include these
-overrides. Overrides are currently assumed to be binary.
+Override a single lintian error in the debian/ directory for the tag.
+Returns "overridden" if the tag was overridden. Returns
+"already-overridden" if the tag was already overridden. Returns undef on
+error. Doesn't append another tag if it's already there.
 
 TODO: eliminate binary dependency. 
 
 =cut
-sub override_lintian {
+sub override_lintian 
+{
     my ($self, %opts) = @_;
 
     $self->__get_debian_file("source");
 
-    return undef if not defined $opts{packages};
-    return undef if not ref $opts{packages} eq 'HASH';
-
+    return undef if not defined $opts{package};
+    return undef if not defined $opts{tag};
     my $count = 0;
-    foreach my $package (keys %{$opts{packages}}) {
-        open my $fh, ">>", $self->__get_debian_file($package . ".lintian-overrides") or do {
-            carp "can't open filehandle for lintian override $!";
-            return undef;
+
+    my $fname = $self->__get_debian_file($opts{package} . ".lintian-overrides");
+    my @lines = ();
+    if (-f $fname) 
+    {
+        @lines = do 
+        {
+            open my $fh, "<", $fname;
+            <$fh>;
         };
 
-        foreach my $override (@{$opts{packages}{$package}}) {
-            say "Override: $override in ". $self->__get_debian_file($package . ".lintian-overrides");
-            say $fh $override;
-            ++$count;
-        }
-        close $fh;
+        map { chomp $_; } @lines;
     }
-    return $count;
+
+    return "already-overridden" if grep { $_ eq $opts{tag} } @lines;
+
+    open my $fh, ">>", $fname
+        or do 
+    {
+        carp "can't open filehandle for lintian override $!";
+        return undef;
+    };
+
+    say $fh $opts{tag};
+
+    close $fh;
+    return "overridden";
 }
 
 =item $artifact_list = $p->binary_artifacts();
@@ -639,29 +800,78 @@ this machine. This uses the build architecture of the machine running as the
 architecture postfix.
 
 =cut
-sub binary_artifacts {
+sub binary_artifacts 
+{
     my ($self, @args) = @_;
     my $file_strings = [];
 
-    if (scalar @args) {
+    if (scalar @args) 
+    {
         carp "Can't set binary_artifacts";
         return undef;
     }
 
+    my $changes_file = $self->get_artifact_name(suffix=>'.changes')
+        or do
+    {
+        carp "A changes file is required.";
+        return undef;
+    };
+
     my $ctrl = $self->get_control_file(); 
+
+    
     my $packages = $ctrl->packages(); 
 
-    foreach my $hash (@$packages) {
-        push @$file_strings,
-                $hash->{'Package'}
-                . "_"
-                . $self->version()
-                . "_"
-                . Dpkg::Arch::get_build_arch()
-                . ".deb";
+    my $changes =  Dpkg::Control->new(type=>CTRL_FILE_CHANGES);
+    $changes->load($changes_file)
+        or do 
+    {
+        carp "Couldn't load changes file";
+        return undef;
+    };
+
+    my @files = grep { if (/.*\.deb$/) { $_; } else {undef;} } 
+                    map { (split /\s+/)[4]; } 
+                        grep { $_ ? $_ : undef; }
+                            split '\n', $changes->{Files};
+    return undef if not scalar @files;
+    return [@files];
+}
+
+sub binary_packages 
+{
+    my ($self, $args) = @_;
+
+    my $ctrl = $self->get_control_file
+        or do 
+    {
+        carp "can't get control file";
+        return undef;
+    };
+
+    return $ctrl->packages;
+}
+
+sub build_depends 
+{
+    my ($self, $args) = @_;
+
+    my $ctrl = $self->get_control_file
+        or do 
+    {
+        carp "Can't get control file";
+        return undef;
+    };
+
+    my $depends_names = [split /\s*,\s*/, $ctrl->source_control->{"Build-Depends"}];
+
+    if (not scalar @{$depends_names}) {
+        carp "Warning: Returning no build-depends: " . $self->name;
+        return undef;
     }
 
-    return $file_strings;
+    return $depends_names;
 }
 
 =back

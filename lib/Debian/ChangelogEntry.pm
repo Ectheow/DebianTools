@@ -38,7 +38,7 @@ sub generate_changelog_entry {
     my $fh = $opts{filehandle};
 
     say $fh $self->{package}->name() . " (" . $self->{package}->version() . ") "
-            . $self->{package}->distribution() . "; urgency=" . $self->{urgency};
+            . ($self->{distribution} // $self->{package}->distribution()) . "; urgency=" . $self->{urgency};
 
     foreach my $entry (@{$self->{changes}}) {
         print $fh "\n";

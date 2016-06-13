@@ -14,40 +14,45 @@ sub new {
     return bless $self, $class;
 }
 
-
-sub version {
+sub version 
+{
     my ($self, $arg) = @_;
 
-    if (defined $arg) {
-        my ($deb, $up) = split "-", $arg;
-        $self->debian_version($deb);
+    if (defined $arg) 
+    {
+        my ($up, $deb) = split "-", $arg;
         $self->upstream_version($up);
+        $self->debian_version($deb);
     }
 
-    return join "-", ($self->{upstream_version}, $self->{debian_version});
+    return join "-", ($self->{upstream_version}, 
+                      $self->{debian_version});
 }
 
-sub name {
+sub name 
+{
     my ($self, $arg) = @_;
 
-    if (defined $arg) {
+    if (defined $arg) 
+    {
         $self->{package_name} = $arg;
     }
-
     return $self->{package_name};
 }
 
 sub upstream_version {
     my ($self, $arg) = @_;
 
-    if (defined $arg) {
+    if (defined $arg) 
+    {
         $self->{upstream_version} = $arg;
     }
 
     return $self->{upstream_version};
 }
 
-sub debian_version {
+sub debian_version 
+{
     my ($self, $arg) = @_;
 
     if (defined $arg) {
@@ -57,7 +62,8 @@ sub debian_version {
     return $self->{debian_version};
 }
 
-sub distribution {
+sub distribution 
+{
     my ($self, $arg) = @_;
 
    if (defined $arg) {
