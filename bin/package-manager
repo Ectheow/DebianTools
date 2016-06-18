@@ -23,18 +23,16 @@ sub main(@)
         die "main: Exception caught: $e"
     }
 
-    given($arg)
-    {
-        when("list")
-        {
+    foreach($arg) {
+
+        when("list") {
             foreach my $package (@{$packman->packages})
             {
                 say $package->source_package->name;
             }
         }
-        default
-        {
-            die "main: Invalid action: $arg";
+        default {
+            die "main: Invalid action: $_";
         }
     }
 

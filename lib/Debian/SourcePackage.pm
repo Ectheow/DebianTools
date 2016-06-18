@@ -1,12 +1,13 @@
 package Debian::SourcePackage;
 use Carp;
 use autodie;
-use Cwd;
+use Cwd qw(realpath getcwd);
 use Dpkg::Changelog::Debian;
 use Dpkg::Arch qw[get_host_arch get_build_arch];
 use Dpkg::Control;
 use Debian::ChangelogEntry;
 use Debian::ControlFile;
+use Dirstack;
 use strict;
 use warnings;
 use Archive::Tar;
@@ -18,6 +19,7 @@ use IO::Zlib;
 use File::Spec;
 use v5.20;
 use parent 'Debian::Package';
+
 
 =head1
 
@@ -33,7 +35,8 @@ sub new {
         orig_tar => undef,
         dir => undef,
         dsc_file => undef,
-        @_);
+        @_,
+    );
 
     if (defined $self->{dsc_file})
     {
@@ -89,7 +92,9 @@ sub init_from_orig
     \.orig.*
     }xi;
 
-    if(not $self->{orig_tar} =~ m/$package_regex/)
+    my $dir = dirname $self->{orig_tar};
+
+    if(not ((basename $self->{orig_tar}) =~ m/$package_regex/))
     {
         carp "orig tar didn't match standard debian orig tar format";
         return undef;
@@ -97,17 +102,19 @@ sub init_from_orig
     $self->name ($1);
     $self->upstream_version ($2);
 
+    $self->{dir} = join "/", (
+        $dir,
+        $self->name . "-" . $self->upstream_version);
 
-    $self->extract_orig
-        or do 
+
+    $self->extract_orig or do 
     {
         carp "Can't extract orig tarball";
         return undef;
     };
 
     $self->{extract_state} = 1;
-    $self->read_version_from_changelog
-        or do 
+    $self->read_version_from_changelog or do 
     {
         carp "Can't read verisoning info from changelog";
         return undef;
@@ -130,34 +137,32 @@ sub init_from_dsc
 
     my $dsc_file=Dpkg::Control->new();
 
-    $dsc_file->load($self->{dsc_file})
-        or do
+    $dsc_file->load($self->{dsc_file}) or do
     {
         carp "can't parse DSC file: " . $self->{dsc_file};
         return undef;
     };
 
-    $self->name($dsc_file->{Source})
-        or do
+    $self->name($dsc_file->{Source}) or do
     {
         carp "can't set name: " . $dsc_file->{Source};
         return undef;
     };
-    $self->version($dsc_file->{Version})
-        or do
+
+    $self->version($dsc_file->{Version}) or do
     {
         carp "Can't set version: " . $dsc_file->{Version};
         return undef;
     };
 
-    $self->source_extract
-        or do
+    $self->{dir} = dirname($self->{dsc_file}) . "/" . $self->name . "-" . $self->upstream_version . "/";
+
+    $self->source_extract or do
     {
         carp "Provided with a DSC file, but couldn't extract source.";
         return undef;
     };
-    $self->read_version_from_changelog
-        or do
+    $self->read_version_from_changelog or do
     {
         carp "Can't read version from changelog";
         return undef;
@@ -175,7 +180,6 @@ sub init_from_source_dir
         carp "The provided dir: '" . $self->{dir} . "' doesn't exist";
         return undef;
     }
-
     my $dir_regex = qr{
         ^([\w\d\-]+)
         -
@@ -210,6 +214,7 @@ archive exists. Returns a Dpkg::Changelog object.
 sub parse_changelog {
     my ($self, %args) = @_;
 
+    my $d = $self->__pd;
     my $changelog = Dpkg::Changelog::Debian->new();
 
     $changelog->load($self->__checked_get_debian_file("changelog")) or do {
@@ -223,7 +228,9 @@ sub parse_changelog {
 sub read_version_from_changelog {
     my ($self, %opts) = @_;
 
-    my $chng = $self->parse_changelog() or do {
+    my $d = $self->__pd;
+    my $chng = $self->parse_changelog() or do 
+    {
         carp "can't read version";
         return undef;
     };
@@ -259,25 +266,31 @@ sub extract_orig {
     my $self = shift;
     my $source_orig = $self->orig_tar_name();
 
-    if (not -f $source_orig) {
+    if (not defined $source_orig or  not -f $source_orig) {
         carp "No source orig: $source_orig";
         return undef;
     }
 
     my $tar = Archive::Tar->new();
 
-    $tar->read($source_orig)
-        or do {
+
+    $tar->read($source_orig) or do 
+    {
         carp "Can't read orig tarball: $source_orig";
         return undef;
     };
 
+    my $dir = getcwd;
+    chdir dirname $self->{dir};
     my @files = $tar->extract();
 
     if (not scalar @files) {
         carp "Extracted no files from orig tarball";
         return undef;
     }
+
+    chdir $dir;
+
     return $files[0]->name();
 
 }
@@ -285,13 +298,15 @@ sub extract_orig {
 sub source_extract {
     my $self = shift;
 
+
     my $dsc_file = $self->get_artifact_name(suffix=>".dsc")
         or do {
         carp "can't get dsc artifact";
         return undef;
     };
 
-    system("dpkg-source -x $dsc_file") == 0 or do {
+    my $d = $self->__pd;
+    system("dpkg-source -x " . basename($dsc_file)) == 0 or do {
         carp "Can't extract $dsc_file";
         return undef;
     };
@@ -333,6 +348,7 @@ sub extract_debian {
     my $source_orig = $self->orig_tar_name();
     my $debian_tar = $self->debian_tar_name();
 
+    
     
     if (not -f $source_orig) {
         carp "The source orig: $source_orig should already exist, but it doesn't";
@@ -396,14 +412,18 @@ sub source_dir {
         carp "Can't find orig source tarball";
     }
 
-    my $source_dirname =  (substr $source_orig, 0, index($source_orig, ".orig")) =~ tr/_/-/r;
+    my $source_dirname =  dirname $source_orig 
+        . (substr(
+                (basename $source_orig), 
+                0, 
+                index($source_orig, ".orig"))) =~ tr/_/-/r;
+
     if (not (-d $source_dirname)) {
         carp "Source directory $source_dirname didn't exist.";
         return undef;
     }
 
     return $source_dirname;
-
 }
 
 sub save_tar {
@@ -490,7 +510,10 @@ sub source_build {
         carp "Received a directory that DNE: $source_dir";
         return undef;
     }
-    system("dpkg-source --build $source_dir") == 0 
+
+    my $d = $self->__pd;
+    $d->pushd("..");
+    system("dpkg-source --build " . basename($source_dir)) == 0 
         or do {
         carp "Can't build source directory $source_dir";
         return undef;
@@ -508,10 +531,12 @@ Gets the filename for the orig tarball.
 sub orig_tar_name {
     my $self = shift;
 
-    my $root = $self->name
-    . "_"
-    . $self->upstream_version
-    . ".orig.tar";
+    my $root = realpath(dirname($self->{dir})
+        . "/"
+        . $self->name
+        . "_"
+        . $self->upstream_version
+        . ".orig.tar");
 
     if (-f $root) {
         return $root;
@@ -545,6 +570,16 @@ sub debian_tar_name {
     return undef;
 }
 
+
+sub __pd {
+    my ($self) = @_;
+
+    my $dirstack = Dirstack->new();
+
+    $dirstack->pushd($self->{dir});
+
+    return $dirstack;
+}
 
 sub debian_dir_name {
     my $self = shift;
@@ -644,6 +679,7 @@ sub set_watch {
 
     my ($self, %opts) = @_;
 
+    my $d = $self->__pd;
     unless(defined $opts{text}) {
         carp "Undefined options text";
         return undef;
@@ -666,6 +702,7 @@ sub set_watch {
 sub load_changelog {
     my ($self, %opts) = @_;
 
+    my $d = $self->__pd;
     my $changelog = $self->parse_changelog() or do {
         carp "Can't parse changelog";
         return undef;
@@ -677,6 +714,7 @@ sub load_changelog {
 sub append_changelog_entry {
     my ($self, %opts) = @_;
 
+    my $d = $self->__pd;
     my @save_lines = ();
 
     unless(defined $opts{entry} and $opts{entry}->isa("Debian::ChangelogEntry")) {
@@ -692,12 +730,14 @@ sub append_changelog_entry {
     @save_lines = <$fh>;
     close $fh;
 
-    open $fh, ">", $self->__checked_get_debian_file("changelog") or do {
+    open $fh, ">", $self->__checked_get_debian_file("changelog") or do 
+    {
         carp "can't write to debian changelog";
         return undef;
     };
 
-    $opts{entry}->generate_changelog_entry(filehandle=>$fh) or do{
+    $opts{entry}->generate_changelog_entry(filehandle=>$fh) or do
+    {
         carp "Can't write entry to debian changelog";
         return undef;
     };
@@ -712,7 +752,13 @@ sub append_changelog_entry {
 sub build {
     my ($self, %opts) = @_;
 
-    system("sudo /usr/sbin/pbuilder --build --debbuildopts '-j -sa' --buildresult . " . $self->get_artifact_name(suffix=>".dsc")) == 0 or do {
+    system("sudo /usr/sbin/pbuilder --build --debbuildopts '-j -sa' " .
+        " --buildresult " . $self->source_dir . "/../"
+        . " "
+        . join(" ", $self->pbuilder_opts)
+        . " "
+        . $self->source_dir . "/../" . $self->get_artifact_name(suffix=>".dsc")) == 0 or do 
+    {
         carp "Couldn't run pbuilder, got a non-zero result.";
         return undef;
     };
@@ -759,6 +805,7 @@ sub override_lintian
 {
     my ($self, %opts) = @_;
 
+    my $d = $self->__pd;
     $self->__get_debian_file("source");
 
     return undef if not defined $opts{package};
@@ -778,6 +825,7 @@ sub override_lintian
         map { chomp $_; } @lines;
     }
 
+    say "returning already overridden" . $opts{tag} if grep {$_ eq $opts{tag}} @lines;
     return "already-overridden" if grep { $_ eq $opts{tag} } @lines;
 
     open my $fh, ">>", $fname
@@ -790,6 +838,7 @@ sub override_lintian
     say $fh $opts{tag};
 
     close $fh;
+    say "Returning overridden: " . $opts{tag};
     return "overridden";
 }
 
@@ -811,8 +860,7 @@ sub binary_artifacts
         return undef;
     }
 
-    my $changes_file = $self->get_artifact_name(suffix=>'.changes')
-        or do
+    my $changes_file = $self->get_artifact_name(suffix=>'.changes') or do
     {
         carp "A changes file is required.";
         return undef;
@@ -820,12 +868,10 @@ sub binary_artifacts
 
     my $ctrl = $self->get_control_file(); 
 
-    
     my $packages = $ctrl->packages(); 
 
     my $changes =  Dpkg::Control->new(type=>CTRL_FILE_CHANGES);
-    $changes->load($changes_file)
-        or do 
+    $changes->load($self->source_dir . "/../" . $changes_file) or do 
     {
         carp "Couldn't load changes file";
         return undef;
@@ -842,6 +888,7 @@ sub binary_artifacts
 sub binary_packages 
 {
     my ($self, $args) = @_;
+    my $d = $self->__pd;
 
     my $ctrl = $self->get_control_file
         or do 
@@ -856,6 +903,7 @@ sub binary_packages
 sub build_depends 
 {
     my ($self, $args) = @_;
+    my $d = $self->__pd;
 
     my $ctrl = $self->get_control_file
         or do 
@@ -872,6 +920,18 @@ sub build_depends
     }
 
     return $depends_names;
+}
+
+sub pbuilder_opts
+{
+    my ($self, @args) = @_;
+
+    if (@args) {
+        $self->{pbuilder_opts} = join " ", @args;
+    }
+
+    $self->{pbuilder_opts};
+
 }
 
 =back

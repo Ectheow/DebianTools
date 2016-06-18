@@ -24,6 +24,7 @@ my $INFO_LEVEL=3;
 my $WARN_LEVEL=2;
 my $ERR_LEVEL=1;
 my $log_level = 3;
+my $MIRROR = "deb http://hlinux-build.us.rdlabs.hpecorp.net/test-repos/ovs-dpdk-16.04 cattleprod main";
 
 my $filename = "./pkgdb.db";
 my %control_fields = (
@@ -46,9 +47,9 @@ sub main_build($);
 sub main_set_state($$$);
 my $orig_path=shift;
 my $func = shift // 'build';
-chdir dirname $orig_path;
-$orig_path = basename $orig_path;
-given($func)
+#chdir dirname $orig_path;
+#$orig_path = basename $orig_path;
+foreach($func)
 {
     when("build")
     {
@@ -71,8 +72,7 @@ sub main_build($)
     (my $root = $orig_path) =~ s/\.orig.*$//;
     
     my $builder = Debian::PackageBuilder->new(
-        orig_tarball=>$orig_path)
-        or do
+        orig_tarball=>$orig_path) or do
     {
         croak "Can't intialize package builder for $orig_path";
     };
@@ -98,16 +98,16 @@ sub main_build($)
         croak "Coudln't edit changelog";
     };
     
-    $builder->build_all
-        or do
+    $builder->add_repo($MIRROR);
+    $builder->build_all or do
     {
         carp "Failed first build";
         return undef;
     };
 
-    while((my $result = $builder->override_lintian()))
-    {
-        given($result)
+    BUILDLOOP: while((my $result = $builder->override_lintian())) {
+
+        foreach($result)
         {
             when("try-again")
             {
@@ -117,17 +117,17 @@ sub main_build($)
             when("all-clear")
             {
                 say "Successfully overrode lintian errors";
-                last;
+                last BUILDLOOP;
             }
             when("unoverridable-errors")
             {
                 say "There are unoverridable errors";
-                last;
+                last BUILDLOOP;
             }
         }
-    } continue {
-        $builder->build_all()
-            or do
+    } 
+    continue {
+        $builder->build_all() or do
         {
             carp "Build failed";
             return undef;
@@ -157,16 +157,16 @@ sub main_set_state($$$)
 sub edit_changelog($) 
 {
     my $pkg_obj = shift;
-    if ($pkg_obj->source_package->debian_version =~ m/.*\+hpelinux\d+$/)
+    if ($pkg_obj->source_pkg->debian_version =~ m/.*\+hpelinux\d+$/)
     {
         say "already changed changelog";
         return 1;
     }
-    $pkg_obj->source_package->debian_version(
-        $pkg_obj->source_package->debian_version . 
+    $pkg_obj->source_pkg->debian_version(
+        $pkg_obj->source_pkg->debian_version . 
         $HPE_VERSION_ADD);
     my $entry = Debian::ChangelogEntry->new(
-        package=>$pkg_obj->source_package,
+        package=>$pkg_obj->source_pkg,
         distribution=>"cattleprod",
         urgency=>"medium",
         changes=>["Update for HPELinux repo inclusion"],

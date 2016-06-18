@@ -1,13 +1,54 @@
 package Debian::PackageBuilder;
 use Debian::SourcePackage;
+use Dirstack;
 use BerkeleyDB::Hash;
 use BerkeleyDB;
+use Cwd;
 use File::Basename;
 use Debian::Util qw[pkgname_from_orig dirname_for_orig];
 use Carp;
+use Moose;
 use v5.20;
 
 my $DONE='done';
+my $UNDEF='undef';
+
+has 'dir' => (
+    isa => 'Str',
+    is => 'ro'
+);
+
+has 'name' => (
+    isa => 'Str',
+    is => 'ro'
+);
+
+has 'orig_tarball' => (
+    isa => 'Str',
+    is => 'ro'
+);
+
+has 'source_pkg' => (
+    isa => 'Debian::SourcePackage',
+    is => 'rw'
+);
+
+has 'repos' => (
+    traits => ['Array'],
+    isa => 'ArrayRef[Str]',
+    is => 'rw',
+    default => sub {[]},
+    handles => {
+        add_repo => 'push',
+    },
+);
+
+has 'gainroot' => (
+    isa => 'Str',
+    is => 'rw',
+    default => sub { 'sudo' }
+);
+
 
 =head1
 
@@ -18,59 +59,55 @@ save a file in that directory containing the state of the build, and try not to
 re-do these parts.
 
 =cut
-sub new {
-    my $class = shift;
 
-    my $self = bless {
-        dir => undef,
-        name => undef,
-        orig_tarball=>undef,
-        @_,
-    }, $class;
 
+sub BUILD {
+    my $self = shift;
     $self->init() or do 
     {
         carp "Couldn't initialize the PackageBuilder.";
         return undef;
     };
-
     return $self;
 }
 
 
 sub init
 {
-    my $self = shift;
+    my ($self) = @_;
 
     my $pkgname = undef;
     my $dir = undef;
 
-    if (defined $self->{dir} and defined $self->{name})
-    {
+    if (defined $self->{dir} 
+          and defined $self->{name}) {
         $pkgname = $self->{name};
         $dir = $self->{dir};
     }
-    elsif(defined $self->{orig_tarball} and -f $self->{orig_tarball}) 
-    {
-        ($pkgname = pkgname_from_orig($self->{orig_tarball}))
-            or do
+    elsif(defined $self->{orig_tarball} 
+            and -f $self->{orig_tarball}) {
+        ($pkgname = pkgname_from_orig($self->{orig_tarball})) or do
         {
             carp "Undefined packagename";
             return undef;
         };
         $dir = dirname ($self->{orig_tarball});
+        $self->{orig_tarball} = basename $self->{orig_tarball};
     }
-    else 
-    {
-        carp "Insufficient parameters for cunstruction of package";
+    elsif(not -f $self->{orig_tarball}) {
+        carp "File: " . $self->{orig_tarball} . " doesn't exist";
+        return undef;
+    }
+    else {
+        carp "Not enough aprameters defined to init source package";
         return undef;
     }
 
     %{$self->{state_hash}} = ();
 
-    $self->{state_fname} = $dir
-        . $pkgname
-        . ".buildstate");
+    $self->{state_fname} = 
+        "." . $pkgname
+        . ".buildstate";
 
     my $flags = 0;
     $flags |= DB_CREATE if not -f $self->{state_fname};
@@ -87,36 +124,34 @@ sub init
 
 
      if($self->{state_hash}->{control} eq $DONE
-             and $self->{state_hash}->{dsc_file})
-     {
-         if(not -f $self->{state_hash}->{dsc_file})
-         {
+          and exists $self->{state_hash}->{dsc_file}
+          and $self->{state_hash}->{dsc_file} ne $UNDEF) {
+
+         if(not -f $dir . "/" . $self->{state_hash}->{dsc_file}) {
              carp "DSC file defined in saved hash doesn't exist: "
+                    . $dir . "/"
                     . $self->{state_hash}->{dsc_file};
              return undef;
          }
          $self->{source_pkg} = Debian::SourcePackage->new(
-             dsc_file=>$self->{state_hash}->{dsc_file})
-             or do 
+             dsc_file=> $dir . "/" . $self->{state_hash}->{dsc_file}) or do 
          {
              carp "Can't init hash from DSC file: "
                 . $self->{state_hash}->{dsc_file};
             return undef;
          };
      }
-     else
-     {
+     else {
          $self->{source_pkg} = Debian::SourcePackage->new(
-             orig_tar=>$self->{orig_tarball})
-             or do
+             orig_tar=> $dir .  "/" . $self->{orig_tarball}) or do
          {
-             carp "Can't create a new SourcePackage";
+             carp "Can't create a new SourcePackage in "
+                  . $dir . "/" . $self->{orig_tarball};
              return undef;
          };
-
     }
     
-   1;
+   1
 }
 
 
@@ -131,11 +166,9 @@ sub edit_control
 
     my %control_fields_write = %{$opts{control_fields_write}};
     my %control_fields_move = %{$opts{control_fields_move}};
-    my $spkg = $self->{source_pkg};
+    my $spkg = $self->source_pkg;
     
-
-    (my $ctrl = $spkg->get_control_file())
-        or do 
+    (my $ctrl = $spkg->get_control_file()) or do 
     {
         carp "Can't get control file from source package";
         return undef;
@@ -143,29 +176,26 @@ sub edit_control
 
     my $source_paragraph = $ctrl->source_control();
 
-    foreach my $key (keys %{$source_paragraph})
-    {
-        if (exists $control_fields_move{$key})
-        {
+    foreach my $key (keys %{$source_paragraph}) {
+        if (exists $control_fields_move{$key}) {
             $source_paragraph->{$control_fields_move{$key}}
                 = $source_paragraph->{$key};
         }
     }
 
-    foreach my $key (keys %control_fields_write)
-    {
+    foreach my $key (keys %control_fields_write) {
         $source_paragraph->{$key} = $control_fields_write{$key};
     }
 
-    $ctrl->save
-        or do
+    $ctrl->save or do
     {
         carp "Couldn't save control file";
         return undef;
     };
+
     $self->{state_hash}->{control} = $DONE;
 
-    1;
+    1
 }
 
 sub add_changelog_entry
@@ -303,7 +333,7 @@ sub override_lintian
 
     $result //= "all-clear";
 
-    given ($result)
+    foreach($result)
     {
         when("all-clear")
         {
@@ -326,7 +356,7 @@ sub set_state
 {
     my ($self, $state, $name) = @_;
 
-    $state =~ m/(watch|changelog|control|success)/ or do
+    $state =~ m/(watch|changelog|control|success|dsc_file)/ or do
     {
         carp "Bad state key $state";
         return undef;
@@ -346,42 +376,54 @@ sub build_all
 {
     my $self = shift;
 
-    $self->{source_pkg}->source_build
-        or do
+    $self->source_pkg->source_build or do
     {
         carp "Couldn't build source";
         return undef;
     };
 
+    system($self->gainroot . " /usr/sbin/pbuilder --update --allow-untrusted --override-config " . $self->repos_string) == 0 or do
+    {
+        carp "Can't update pbuilder";
+        return undef;
+    };
+
     $self->{state_hash}->{dsc_file}
-        = $self->{source_pkg}->get_artifact_name(suffix=>".dsc")
-            or do
+        = $self->{source_pkg}->get_artifact_name(suffix=>".dsc") or do
     {
         carp "Undefined dsc file";
         return undef;
     };
 
-    $self->{source_pkg}->build
-        or do
+
+    $self->source_pkg->pbuilder_opts($self->repos_string);
+
+    $self->source_pkg->build or do
     {
         carp "Couldn't do source build";
         return undef;
     };
 
+    $self->source_pkg->pbuilder_opts('');
     $self->{state_hash}->{last_build} = time;
     1;
 }
 
-sub source_package
+sub repos_string
 {
-    return $_[0]->{source_pkg};
+    my ($self) = @_;
+
+    return join " ", map { "--othermirror '" . $_ . "'" } @{$self->repos};
 }
+
 
 sub success
 {
     $_[0]->{state_hash}->{success} = "1";
 }
-sub DESTROY
+sub DEMOLISH
 {
     untie %{$_[0]->{state_hash}};
 }
+
+1

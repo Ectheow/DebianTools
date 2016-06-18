@@ -1,5 +1,6 @@
 package Debian::PackageManager;
 use Debian::SourcePackage;
+use Debian::PackageBuilder;
 use warnings;
 use strict;
 use Moose;
@@ -30,14 +31,16 @@ sub parse_hash_file($)
 
     my $package_config_hash = decode_json $text;
 
-    while(my ($k, $v) = (each %$package_config_hash))
-    {
-        my $pkg = Debian::SourcePackage->new(
+    while(my ($k, $v) = (each %$package_config_hash)) {
+
+        my $pkg = Debian::PackageBuilder->new(
             dir => $v->{dir},
             name => $k);
         die "Couldn't construct package: $k" if not defined $pkg;
         push @{$self->packages}, $pkg;
     }
+
+    1
 }
 
 1
