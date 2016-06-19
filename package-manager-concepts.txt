@@ -1,0 +1,26 @@
+Components of a module helping with debian packaging
+
+Package
+    - abstract definition of a packge which pertains to binary as well as source
+      packages in that it has a name, an upstream version, and a debian version. 
+Source Package
+    - Basic attribute tracking, read/write ability for control files. 
+      Allows you to modify control files or override lintian errors or 
+      add a watch file, also build and extract source.
+Binary Pacakge
+    - Has a 'parent' Source Package object
+    - basically nothing else except for possibly a pass-through method
+      for writing control information.
+
+Source Package Builder
+    - builds source packages, handles extra repos, updating, etc.
+    - Can be initialized from a dsc or orig tarball.
+
+
+Package Manager 
+    - Manages a single source package with a hidden db file in that directory,
+      keeps track of state, when was the last time it was uploaded, built, etc.
+
+Packages Manager
+    - Keeps track of where all the source packages are on the system. Allows you
+      to query them from wherever.
