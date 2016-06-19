@@ -1,0 +1,5 @@
+sample-package (1.0-1) stable; urgency=medium
+
+  * Initial release. (Closes: #XXXXXX)
+
+ -- john <john@john-werkstation.americas.hpqcorp.net>  Sun, 19 Jun 2016 00:39:40 +0000

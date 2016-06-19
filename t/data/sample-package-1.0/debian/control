@@ -1,0 +1,11 @@
+Source: source-package
+Section: devel
+Priority: optional
+Maintainer: John Doe <john.doe@doe.org>
+Build-Depends: debhelper (>= 9.0.0)
+Standards-Version: 3.9.8
+
+Package: binary-package
+Section: devel
+Architecture: all
+Description: sample binary pacakge

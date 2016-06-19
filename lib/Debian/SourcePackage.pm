@@ -1,3 +1,8 @@
+package Debian::SourcePackage::Error;
+use Moose;
+extends 'Throwable::Error';
+
+
 package Debian::SourcePackage;
 use Carp;
 use autodie;
@@ -7,248 +12,259 @@ use Dpkg::Arch qw[get_host_arch get_build_arch];
 use Dpkg::Control;
 use Debian::ChangelogEntry;
 use Debian::ControlFile;
+use Debian::Util;
 use strict;
 use warnings;
 use Archive::Tar;
 use File::Basename;
+use Util::Dirstack;
 use File::Find;
 use Switch;
 use IO::Compress::Xz;
 use IO::Zlib;
 use File::Spec;
 use v5.20;
-use parent 'Debian::Package';
+use Moose;
+
+=head
+
+A debian source package represents, well, a debian source package. A source
+package is a tricky object in that it may be represented fully by
+
+    1. A source directory and nothing else.
+    2. An orig tarball and a .debian.tar.xz or other source package debianization archive.
+    3. Just an orig tarball.
+
+It may also have associated build artifacts which provide helpful information
+about state.
+
+You should be able to point this object at any build artifact or primary source
+object, and to the following:
+    
+    1. Do a source build
+    2. Do a source extraction.
+    3. Edit any control information and commit it by a source build.
+    4. Get descriptions of any control information in various formats - 
+       
+You should be able to do this from anywhere on the filesystem and not worry
+about your current directory being mucked by the methods you call, although
+they may themselves change directories.
+
+=cut
+
+
+
+has 'debian_version' => (
+    is => 'ro',
+    isa => 'Str',
+    writer => '_debian_version'
+);
+
+has 'upstream_version' => (
+    is => 'ro',
+    isa => 'Str',
+    writer => '_upstream_version'
+);
+
+has 'name' => (
+    is => 'ro',
+    isa => 'Str',
+    writer => '_name'
+);
+
+has 'containing_dir' => (
+    is => 'ro',
+    isa => 'Str',
+    writer => '_containing_dir'
+);
+
+
 
 =head1
 
-Package for manipulating a debian package's files.
+Construction
+
+You should be able to construct a source package from a variety of source or
+build artifacts.  You should be able to construct an object from a path
+pointing to any of the following:
+
+    1. Orig tarball
+    2. Source directory without a tarball
+    3. dsc file
+    4. changes file
+
+These are organized in least-to-greatest order in terms of how far along the
+packages is in it's build process/debianization. Here is the behaviour:
+
+    1. Orig tarball
+        1. Test to see if the corresponding source dir, dsc file, or changes file exist.
+            Die if so.
+        2. Unconditionally extract the orig tarball.
+        3. Read information about name/versioning etc. from the source dir
+        4. On success, return. If normal debian dirs don't exist, die.
+    2. Source directory
+        1. Read information about name/versioning etc. from the source dir. 
+           On failure, die.
+        2. Check for an orig tarball. If it doesn't exist, and we have in the 
+           options kw hash the value CREATE_ORIG=>1, create it. Otherwise, die.
+        3. try to build the source with dpkg-source -b. Die on failure.
+    3. DSC file
+        1. Read the name/versioning info from the DSC file.
+        2. Check for the orig tarball that the DSC file describes. Die if it doesn't exist.
+        3. Check for the debian tarball _or_ the source dir the DSC describes. Die if it doesn't exist.
+    4 Changes file
+        1. Same as DSC file. Don't check for binary artifacts.
 
 =cut
-sub new {
+
+sub BUILDARGS
+{
     my $class = shift;
+    my %args = (
+            orig_tarball=>undef,
+            source_directory=>undef,
+            dsc_file => undef,
+            changes_file => undef,
+            opts => undef,
+            @_);
 
-    my $self = $class->SUPER::new(
-        extract_state => 0,
-        build_dependencies => [],
-        orig_tar => undef,
-        dir => undef,
-        dsc_file => undef,
-        @_);
-
-    if (defined $self->{dsc_file})
-    {
-        $self->init_from_dsc
-            or do
-        {
-            carp "Can't initialize from dsc file "
-                . $self->{dsc_file};
-            return undef;
-        };
+    my $self = {};
+    my $opts = $args{opts} // {};
+    if (defined $args{orig_tarball}) {
+        return init_from_orig($self, $args{orig_tarball}, $opts);
     }
-    elsif (defined $self->{dir}) {
-        $self->init_from_source_dir
-            or do {
-            carp "Can't initialize from source directory: "
-            . $self->{dir};
-            return undef;
-        };
-    } 
-    elsif (defined $self->{orig_tar} and not defined $self->{dir}) 
-    {
-        $self->init_from_orig
-            or do 
-        {
-            carp "Can't initialize source package";
-            return undef;
-        };
+    elsif(defined $args{source_directory}) {
+        return init_from_source_dir($self, $args{source_directory}, $opts);
+    }
+    elsif(defined $args{dsc_file}) {
+        return init_from_dsc_file($self, $args{dsc_file}, $opts);
+    }
+    elsif(defined $args{changes_file}) {
+        return init_from_changes_file($self, $args{changes_file}, $opts);
+    }
+    else {
+        Debian::SourcePackage::Error->throw({
+                message=>"No relevant build artifacts passed for construction"});
     }
 
+}
+
+sub init_from_orig($$$)
+{
+    my ($self, $tarball, $opts) = @_;
+
+    Debian::SourcePackage::Error->throw({message => "Tarball: $tarball doesn't exist"}) 
+        if not -f $tarball;
+
+
+    my $d = Util::Dirstack->new;
+
+    $d->pushd(dirname $tarball);
+    my $dname = Debian::Util::dirname_for_orig(basename $tarball);
+
+    Debian::SourcePackage::Error->throw({message => "source directory: $dname for tarball: $tarball already exists"})
+        if -d $dname;
+
+    (my @files = Archive::Tar->extract_archive(basename $tarball))
+        or Debian::SourcePackage::Error->throw({
+            message=>"Can't extract: $tarball"});
+
+
+
+
+    Debian::SourcePackage::Error->throw({
+            message=> "debian/ directory doesn't exist in extracted source: " . $dname})
+        if not -d $dname . "/debian"; 
+
+    my $v_h = read_version_from_changelog(changelog_filename => $dname . "/debian/changelog");
+
+    $self->{$_} = $v_h->{$_} foreach keys %{$v_h};
 
     return $self;
 }
 
-=head
-=over4
-=item $p->init_from_orig()
-
-Initialize the source package from an un-extracted orig tarball.
-
-=cut
-sub init_from_orig 
+sub init_from_source_dir($$$)
 {
-    my $self = shift;
-    if (not -f $self->{orig_tar}) {
-        carp "The provided orig tarball doesn't exist.";
-        return undef;
+    my ($self, $dirname, $opts) = @_;
+
+    Debian::SourcePackage::Error->throw({
+            message=>"Source directory $dirname doesn't exist"})
+        if not -d $dirname;
+
+    Debian::SourcePackage::Error->throw({
+            message=>"Orig tarball for $dirname doesn't exist, and no create option specified"})
+        if (not (grep { -f $_ } (Debian::Util::orignames_for_dir($dirname))) 
+                 and 
+                 (not (exists($opts->{create_orig}) and $opts->{create_orig} == 1)));
+
+
+    if (not grep { -f $_} Debian::Util::orignames_for_dir($dirname) and $opts->{create_orig} == 1) {
+        # make the source orig tarball.
+
     }
-
-    my $package_regex = qr{
-    ([\w\d\-]+)
-    _
-    ([\w\d\.]+)
-    \.orig.*
-    }xi;
-
-    if(not $self->{orig_tar} =~ m/$package_regex/)
-    {
-        carp "orig tar didn't match standard debian orig tar format";
-        return undef;
-    }
-    $self->name ($1);
-    $self->upstream_version ($2);
-
-
-    $self->extract_orig
-        or do 
-    {
-        carp "Can't extract orig tarball";
-        return undef;
-    };
-
-    $self->{extract_state} = 1;
-    $self->read_version_from_changelog
-        or do 
-    {
-        carp "Can't read verisoning info from changelog";
-        return undef;
-    };
-
-    1;
 }
 
-sub init_from_dsc
+sub init_from_dsc_file($$$)
 {
-    my $self = shift;
-
-    if (not -f $self->{dsc_file})
-    {
-        carp "the provided DSC file: " . $self->{dsc_file}
-            . "Doesn't exist";
-        return undef;
-    }
-
-
-    my $dsc_file=Dpkg::Control->new();
-
-    $dsc_file->load($self->{dsc_file})
-        or do
-    {
-        carp "can't parse DSC file: " . $self->{dsc_file};
-        return undef;
-    };
-
-    $self->name($dsc_file->{Source})
-        or do
-    {
-        carp "can't set name: " . $dsc_file->{Source};
-        return undef;
-    };
-    $self->version($dsc_file->{Version})
-        or do
-    {
-        carp "Can't set version: " . $dsc_file->{Version};
-        return undef;
-    };
-
-    $self->source_extract
-        or do
-    {
-        carp "Provided with a DSC file, but couldn't extract source.";
-        return undef;
-    };
-    $self->read_version_from_changelog
-        or do
-    {
-        carp "Can't read version from changelog";
-        return undef;
-    };
-
-    $self->{extract_state} = 1;
-
-    1;
 }
-sub init_from_source_dir
+
+sub init_from_changes_file($$$)
 {
-    my $self = shift;
-
-    if (not -d $self->{dir}) {
-        carp "The provided dir: '" . $self->{dir} . "' doesn't exist";
-        return undef;
-    }
-
-    my $dir_regex = qr{
-        ^([\w\d\-]+)
-        -
-        ([\d\.\w]+)$
-    }xi;
-
-    if (not $self->{dir} =~ m/$dir_regex/) {
-        carp "$self->{dir} doesn't match normal debian extraction name";
-        return undef;
-    }
-
-    $self->{extract_state} = 1;
-    $self->name($1);
-    $self->upstream_version($2);
-
-    $self->read_version_from_changelog
-        or do {
-        carp "Can't read versioning info from changelog";
-        return undef;
-    };
-
-    1;
 }
 
-=over 4
-=item $changelog = $p->parse_changelog
+sub read_version_from_changelog(%) {
+    my (%opts) = @_;
 
-Parses the changelog for the package. Requires that the orig_tar or a debian tar
-archive exists. Returns a Dpkg::Changelog object.
+    my $changelog = Dpkg::Changelog::Debian->new;
 
-=cut
-sub parse_changelog {
-    my ($self, %args) = @_;
+    Debian::SourcePackage::Error->throw({
+            message=> "Not given a changelog kw argument"})
+        if not exists $opts{changelog_filename};
+    Debian::SourcePackage::Error->throw({
+            message=>"Changelog file: " . $opts{changelog_filename} . "Doesn't exist"})
+        if not -f $opts{changelog_filename};
+    $changelog->load($opts{changelog_filename});
 
-    my $changelog = Dpkg::Changelog::Debian->new();
 
-    $changelog->load($self->__checked_get_debian_file("changelog")) or do {
-        carp "Can't load changelog file";
-        return undef;
+    my $top_entry = $changelog->[0];
+
+    my $top_line = (split "\n", $top_entry)[0];
+
+    my ($name, $upstream_version, $debian_version, $distribution) = 
+        ($top_line =~ m/
+            ^([\S]+)
+            \s+
+            \(
+                ([\w\:\d\.]+)
+                \-
+                ([\w\+\d\-]+)
+            \)
+            \s+
+            ([\w\d]+)
+            \;
+            \s+
+            [\w\d\=]+
+            \s*
+            $
+            /xi);
+
+         
+    my $h = {
+        upstream_version=>$upstream_version, 
+        debian_version=>$debian_version, 
+        distribution=>$distribution,
+        name=>$name
     };
 
-    return $changelog;
-}
-
-sub read_version_from_changelog {
-    my ($self, %opts) = @_;
-
-    my $chng = $self->parse_changelog() or do {
-        carp "can't read version";
-        return undef;
-    };
-
-    my $top_entry = $chng->[0];
-
-    
-    my ($upv, $debv) = 
-        split "-", $top_entry->get_version();
-
-
-    $self->upstream_version($upv);
-    $self->debian_version($debv);
-
-    if (not defined $self->upstream_version) {
-        carp "Can't read upstream version from changelog";
-        return undef;
-    }
-    elsif (not defined $self->debian_version) {
-        carp "Can't read debian version from changelog";
-        return undef;
+    while(my ($k, $v) = each %{$h}) {
+        Debian::SourcePackage::Error->throw({
+                message=>"Undefined value for key: $k while parsing debian changelog"})
+            if not defined $v;
     }
 
-    return 1;
+    return $h;
 }
+
 
 =item $result = $p->extract_orig();
 
@@ -709,40 +725,7 @@ sub append_changelog_entry {
     return 1; 
 }
 
-sub build {
-    my ($self, %opts) = @_;
 
-    system("sudo /usr/sbin/pbuilder --build --debbuildopts '-j -sa' --buildresult . " . $self->get_artifact_name(suffix=>".dsc")) == 0 or do {
-        carp "Couldn't run pbuilder, got a non-zero result.";
-        return undef;
-    };
-
-    say "dsc; " . $self->get_artifact_name(suffix=>".dsc");
-    system("dpkg-source -x " . $self->get_artifact_name(suffix=>".dsc")) == 0 or do {
-        carp "Can't re-extract source";
-        return undef;
-    };
-
-    return 1;
-}
-
-sub dput_to {
-    my ($self, %opts) = @_;
-
-    unless(-f $self->get_artifact_name(suffix=>".changes")) {
-        carp ".changes file: "
-            . $self->get_artifact_name(suffix=>".changes")
-            . " doesn't exist. Did you build it?";
-        return undef;
-    };
-
-    system("dput $opts{server} " . $self->get_artifact_name(suffix=>".changes")) == 0 or do {
-        carp "Can't dput to $opts{server}";
-        return undef;
-    };
-
-    return 1;
-}
 
 =item $successs = $p->override_lintian(package=>"example-package",
                                        tag=>"example-error-tag");
