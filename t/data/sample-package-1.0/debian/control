@@ -1,4 +1,4 @@
-Source: source-package
+Source: sample-package
 Section: devel
 Priority: optional
 Maintainer: John Doe <john.doe@doe.org>
