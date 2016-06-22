@@ -193,15 +193,23 @@ sub init_from_source_dir($$$)
 
     Debian::SourcePackage::Error->throw({
             message=>"Orig tarball for $dirname doesn't exist, and no create option specified"})
-        if (not (grep { -f $_ } (Debian::Util::orignames_for_dir($dirname))) 
-                 and 
-                 (not (exists($opts->{create_orig}) and $opts->{create_orig} == 1)));
+        if ( (not grep { -f $_ } (Debian::Util::orignames_for_dir($dirname))) 
+                or 
+              (not (exists($opts->{create_orig}) and $opts->{create_orig} == 1)));
 
 
     if (not grep { -f $_} Debian::Util::orignames_for_dir($dirname) and $opts->{create_orig} == 1) {
         # make the source orig tarball.
-
+        Debian::Util::create_orig_tarball_for_dir($dirname)
+            or Debian::SourcePackage::Error->throw({
+                message => "Orig tarball couldn't be created succesfully for $dirname"});
     }
+
+    my $v_h = read_version_from_changelog(changelog_filename => $dirname . "/debian/changelog");
+
+    $self->{$_} = $v_h->{$_} foreach (keys %{$v_h});
+
+    return $self;
 }
 
 sub init_from_dsc_file($$$)

@@ -43,7 +43,7 @@ subtest "init_from_orig" => sub {
 subtest "init_from_dir" => sub {
     copy ($SAMPLE_TARBALL_STORE, $SAMPLE_TARBALL);
 
-    plan tests => 4;
+    plan tests => 7;
     chdir "t";
     Archive::Tar->extract_archive(basename $SAMPLE_TARBALL);
     chdir "..";
@@ -54,11 +54,15 @@ subtest "init_from_dir" => sub {
 
     throws_ok { Debian::SourcePackage->new(source_directory=>"does_not_exist"); } qr/Source directory does_not_exist doesn't exist/i, 
         'Caught exception for non-existent dir';
-    throws_ok { Debian::SourcePackage->new(source_directory=>$SAMPLE_SRC_DIR); } qr/Orig tarball for \Q$SAMPLE_SRC_DIR\E doesn't exist/i,
+    throws_ok { Debian::SourcePackage->new(source_directory=>$SAMPLE_SRC_DIR); } qr/Orig tarball for \Q$SAMPLE_SRC_DIR\E doesn't exist,.*/i,
         'Caught exception for source dir with no orig tarball';
 
     lives_ok { $debian_source_package = Debian::SourcePackage->new(source_directory=>$SAMPLE_SRC_DIR, opts=>{create_orig => 1}); }
         'Created source package object ok';
+
+    cmp_ok ($debian_source_package->upstream_version, 'eq', $UPSTREAM_VERSION, "Upstream versions are the same");
+    cmp_ok ($debian_source_package->debian_version, 'eq', $DEBIAN_VERSION, "Debian versions match");
+    cmp_ok ($debian_source_package->name, 'eq', $PKG_NAME, "Names match");
 
 
     rmtree $SAMPLE_SRC_DIR;
