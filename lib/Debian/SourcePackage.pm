@@ -299,14 +299,25 @@ sub source_extract {
     my $self = shift;
 
 
-    my $dsc_file = $self->get_artifact_name(suffix=>".dsc")
-        or do {
+    my $dsc_file = $self->get_artifact_name(suffix=>".dsc") or do 
+    {
         carp "can't get dsc artifact";
         return undef;
     };
 
     my $d = $self->__pd;
-    system("dpkg-source -x " . basename($dsc_file)) == 0 or do {
+    $d->pushd("..");
+
+
+    do {
+        carp "Undefined dsc file: $dsc_file in: " . getcwd();
+        return undef;
+    } if(not -f $dsc_file);
+
+    say "basename: " . basename($dsc_file);
+    say "dirname: " . dirname($dsc_file);
+    system("dpkg-source -x " . basename($dsc_file)) == 0 or do 
+    {
         carp "Can't extract $dsc_file";
         return undef;
     };
@@ -511,8 +522,9 @@ sub source_build {
         return undef;
     }
 
-    my $d = $self->__pd;
-    $d->pushd("..");
+
+    chdir($source_dir . "/..");
+    say "chdir: $source_dir/.., pwd: " . getcwd();
     system("dpkg-source --build " . basename($source_dir)) == 0 
         or do {
         carp "Can't build source directory $source_dir";

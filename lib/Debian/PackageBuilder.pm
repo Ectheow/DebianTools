@@ -137,7 +137,8 @@ sub init
              dsc_file=> $dir . "/" . $self->{state_hash}->{dsc_file}) or do 
          {
              carp "Can't init hash from DSC file: "
-                . $self->{state_hash}->{dsc_file};
+                . $self->{state_hash}->{dsc_file}
+                . " in: " . $dir;
             return undef;
          };
      }
