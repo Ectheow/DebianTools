@@ -194,7 +194,7 @@ sub init_from_source_dir($$$)
     Debian::SourcePackage::Error->throw({
             message=>"Orig tarball for $dirname doesn't exist, and no create option specified"})
         if ( (not grep { -f $_ } (Debian::Util::orignames_for_dir($dirname))) 
-                or 
+                and
               (not (exists($opts->{create_orig}) and $opts->{create_orig} == 1)));
 
 
