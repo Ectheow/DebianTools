@@ -1,0 +1,15 @@
+#!/usr/bin/perl
+use v5.20;
+use warnings;
+use strict;
+use BuildRunner;
+
+my $b = BuildRunner->new;
+
+$b->run(builder=>MakeBuildFilter, 
+        build_options=>join(" ", @ARGV), 
+        opts=>{
+            log_file => "./hello.log",
+            output_level => BuildRunner::VERBOSE,
+            color => 1,
+    });

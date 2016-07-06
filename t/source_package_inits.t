@@ -2,23 +2,14 @@ use v5.20;
 use strict;
 use warnings;
 use Test::More;
-use Test::Exception tests => 3;
+use Test::Exception tests => 4;
 use Carp;
 use Debian::SourcePackage;
 use File::Path;
 use Archive::Tar;
 use File::Copy;
 use File::Basename;
-
-my $SAMPLE_TARBALL_STORE = "t/data/sample-package_1.0.orig.tar.gz";
-my $SAMPLE_TARBALL="t/sample-package_1.0.orig.tar.gz";
-my $SAMPLE_DSC_FILE="t/sample-package_1.0-1.dsc";
-my $SAMPLE_DEBIAN_TAR="t/sample-package_1.0-1.debian.tar.xz";
-my $EXTRACTED_DIR ="t/sample-package-1.0";
-my $SAMPLE_SRC_DIR=$EXTRACTED_DIR;
-my $UPSTREAM_VERSION = "1.0";
-my $DEBIAN_VERSION = "1";
-my $PKG_NAME = "sample-package";
+use TestCommon;
 
 my $BAD_DSC_FILE_BAD_FORMAT=<<EOF;
 dowlekERA==dlelr
@@ -77,16 +68,6 @@ subtest "init_from_orig" => sub {
     unlink $SAMPLE_TARBALL;
 };
 
-sub extract_tar {
-    copy ($SAMPLE_TARBALL_STORE, $SAMPLE_TARBALL);
-
-    chdir "t";
-    Archive::Tar->extract_archive(basename $SAMPLE_TARBALL);
-    chdir "..";
-
-    ok ( (-d $SAMPLE_SRC_DIR), "Directory exists for test");
-
-}
 
 sub compare_version_info {
     cmp_ok ($debian_source_package->upstream_version, 'eq', $UPSTREAM_VERSION, "Upstream versions are the same");
@@ -116,7 +97,7 @@ subtest "init_from_dir" => sub {
 
     cmp_ok ($debian_source_package->calc_file_name(type=>"source_directory"), 'eq', $SAMPLE_SRC_DIR);
     compare_version_info;
-    rmtree $SAMPLE_SRC_DIR;
+    standard_cleanup();
 
 };
 
@@ -166,10 +147,28 @@ subtest "init_from_dsc" => sub {
     compare_version_info;
 
     cleanup:
-    unlink $SAMPLE_DSC_FILE if -f $SAMPLE_DSC_FILE;
-    unlink $SAMPLE_DEBIAN_TAR if -f $SAMPLE_DEBIAN_TAR;
-    unlink $SAMPLE_TARBALL;
-    rmtree $SAMPLE_SRC_DIR;
+    standard_cleanup();
+};
+
+
+subtest "source_build_extract" => sub {
+    plan tests => 4;
+
+    extract_tar();
+
+    lives_ok {$debian_source_package = Debian::SourcePackage->new(
+        source_directory => $SAMPLE_SRC_DIR); }
+        "Created source package from $SAMPLE_SRC_DIR";
+
+    lives_ok { $debian_source_package->build_source }
+        "Built source directory for $SAMPLE_SRC_DIR";
+
+    lives_ok { $debian_source_package->extract_source }
+        "Extracted source directory $SAMPLE_SRC_DIR";
+
+    cleanup:
+    standard_cleanup();
+    
 };
 
 done_testing;

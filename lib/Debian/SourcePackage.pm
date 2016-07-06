@@ -83,6 +83,13 @@ has 'name' => (
     writer => '_name'
 );
 
+has 'source_built' => (
+    is => 'ro',
+    isa => 'Bool',
+    writer => '_write_source_built',
+    default => 0,
+);
+
 
 =head1
 
@@ -162,14 +169,36 @@ sub build_source($)
 {
     my ($self) = @_;
 
+    my $dir = $self->calc_file_name(type=>"source_directory");
 
+    my $d = Util::Dirstack->new();
+    $d->pushd(dirname $dir);
+    $dir = basename $dir;
+    system("dpkg-source -b $dir") == 0 or do
+    {
+        Debian::SourcePackage::Error->throw({
+                message => "Failed to build source directory $dir"});
+    };
+
+    $self->_write_source_built(1);
+
+    1
 }
 
 sub extract_source($)
 {
     my ($self) = @_;
-}
 
+    my $dsc = $self->calc_file_name(type=>"dsc");
+
+    system("dpkg-source -x $dsc") == 0 or do 
+    {
+        Debian::SourcePackage::Error->throw({
+                message => "Failed to extract source directory $dsc"});
+    };
+
+    1
+}
 
 sub normalize_filenames($)
 {
@@ -560,10 +589,9 @@ sub override_lintian
 
     return "already-overridden" if grep { $_ eq $opts{tag} } @lines;
 
-    open my $fh, ">>", $fname
-        or do 
+    open my $fh, ">>", $fname or do 
     {
-        Debian::SourcePackage::Error->throw{(
+        Debian::SourcePackage::Error->throw({
                 message => "Uname to open $fname for appending: $!"});
     };
 
