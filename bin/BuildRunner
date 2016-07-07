@@ -5,11 +5,26 @@ use strict;
 use BuildRunner;
 
 my $b = BuildRunner->new;
+my @builders = (
+    'AutomakeBuildFilter',
+    'MakeBuildFilter',
+);
 
-$b->run(builder=>MakeBuildFilter, 
-        build_options=>join(" ", @ARGV), 
+my ($builder, $builder_opts) = (undef, {});
+
+foreach my $_builder (@builders) {
+    require $_builder . ".pm";
+    if ($_builder->will_run) {
+        $builder = $_builder;
+        last;
+    }
+}
+
+$b->run(builder=>$builder,
         opts=>{
             log_file => "./hello.log",
             output_level => BuildRunner::VERBOSE,
             color => 1,
-    });
+            cmdline => [@ARGV],
+        }
+    );

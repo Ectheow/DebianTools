@@ -11,6 +11,7 @@ use Fcntl qw[:DEFAULT];
 use POSIX ();
 use IPC::Open3;
 use Term::ANSIColor qw[:constants];
+use BuildFilter;
 use Moose;
 use constant {
 ERROR => 1,
@@ -35,8 +36,8 @@ $b->run(builder=>"make", build_options=>"-j", opts=>{progress => 1, throw_error 
 
 =cut
 
-our $Timeout = 0.001;
-our $Bufferlen = 10;
+our $Timeout = 0.01;
+our $Bufferlen = 8192;
 
 has 'output_level' => (
     is => 'ro',
@@ -50,9 +51,10 @@ has 'log_file' => (
     writer => '_write_log_file',
 );
 
-has 'filter' => (
-    is => 'rw',
-    isa => 'BuildFilter',
+has 'builder_stack' => (
+    is => 'ro',
+    isa => 'ArrayRef',
+    default => sub{[]},
 );
 
 sub open_log_file
@@ -66,9 +68,9 @@ sub open_log_file
 
 sub builder_init
 {
-    my ($self, $pkg) = @_;
-
-    $self->filter($pkg->new());
+    my ($self, $pkg, $opts) = @_;
+    require $pkg . ".pm";
+    $self->filter($pkg->new(options => $opts));
 }
 
 sub get_build_cmd
@@ -127,16 +129,46 @@ sub run
         $opts{opts}
     );
 
-    $self->builder_init($opts{builder});
+    BuildRunner::Error->throw({
+            message => "Undefined builder"})
+        if not defined $builder;
+    $self->builder_init($builder, $opts_h);
     $self->log_init($opts_h);
 
-    my $build_cmd = can_run($builder)
-        or BuildRunner::Error->throw({
-            message => "Can't run $builder"});
+    while ((my $build_cmd = $self->get_next_build_command())) {
+        $self->run_command($build_cmd) or do 
+        {
+            return undef;
+        };
+    }
+    
+    1
+}
+sub get_next_build_command {
+    my ($self) = @_;
 
-    $build_cmd .= " " . $build_opts
-        if defined $build_opts;
+    my $builder = $self->builder_stack()->[0]
 
+    if (blessed($builder)) {
+        my $cmd = undef;
+        BuildRunnner::Error->throw({
+                message => "builder $builder is not a BuildRunner"});
+        $cmd = $builder->next_build_command;
+        if($cmd) {
+            return $cmd;
+        }
+        else {
+            pop @{$self->builder_stack};
+            return $self->get_next_build_command;
+        }
+    }
+    else {
+        return pop @{$self->builder_stack};
+    }
+}
+
+sub run_command {
+    my ($self, $build_cmd) = @_;
     my ($out, $err);
 
     my $pid = open3(undef, $out, $err, $build_cmd);
@@ -145,6 +177,12 @@ sub run
     my @fhs = ();
     for my $fh ($out, $err) {
         next if not defined $fh;
+        my $flags = fcntl ($fh, F_GETFL, 0);
+        fcntl($fh, F_SETFL, $flags|O_NONBLOCK) or do 
+        {
+            BuildRunner::Error->throw({
+                    message => "Can't set O_NONBLOCK for file descriptor"});
+        };
         $select->add($fh);
         push @fhs, [$fh, ""]; 
     }
@@ -152,25 +190,33 @@ sub run
     my @can_read = ();
     my $has_exited = 0;
     my $exit_code = undef;
-    while( (not $has_exited) or ((@can_read = $select->can_read($Timeout)) > 0) ) {
+    while( ((@can_read = $select->can_read($Timeout)) > 0) or  (not $has_exited)) {
         if (@can_read) {
             my $nread = 0;
             foreach my $fh (@can_read) {
-                my @fh_ent = grep { $_->[0] eq $fh } @fhs;
-                my $offset = length($fh_ent[0]->[1]);
-                # $offset = -1 if($offset);
-                if(($nread = sysread($fh, $fh_ent[0]->[1], $Bufferlen, $offset)) > 0) {
-                    my ($level, $line) = $self->filter->filter_line($fh_ent[0]->[1]);
-                    if ($level == WARN) {
-                        $self->pr_warn($line);
-                    } 
-                    elsif($level == ERROR) {
-                        $self->pr_err($line);
-                    } 
-                    else($level == VERBOSE) {
-                        $self->pr_verbose($line);
+                my ($fh_ent) = grep { $_->[0] eq $fh } @fhs;
+                my $offset = length($fh_ent->[1]);
+                if(($nread = sysread($fh, $fh_ent->[1], $Bufferlen, $offset)) > 0) {
+                    while((my $idx = index ($fh_ent->[1], "\n")) != -1) {
+                        my $line_string = substr($fh_ent->[1], 0, $idx+1);
+                        my ($line, $level) = $self->filter->filter_line($line_string);
+                        if ($level == WARN) {
+                            $self->pr_warn($line);
+                        } 
+                        elsif($level == ERROR) {
+                            $self->pr_err($line);
+                        } 
+                        elsif($level == VERBOSE) {
+                            $self->pr_verbose($line);
+                        }
+                        else {
+                            BuildRunner::Error->throw({
+                                    message => "Invalid level: $level"});
+                        }
+                        substr($fh_ent->[1], 0, $idx+1) = '';
                     }
-               } elsif ($nread == 0) {
+                } 
+                elsif ($nread == 0) {
                     $select->remove($fh);
                 }
             } 
@@ -187,7 +233,8 @@ sub run
         return undef;
     }
 
-    1
+    1;
 }
+
 
 1;
