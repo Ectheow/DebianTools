@@ -25,6 +25,7 @@ use constant {
     DEBIAN => "debian",
 };
 
+
 =head
 
 BuildRunner is a package for running a build of something w/ Makefile or
@@ -38,6 +39,8 @@ $b->run(builder=>"make", build_options=>"-j", opts=>{progress => 1, throw_error 
 
 our $Timeout = 0.01;
 our $Bufferlen = 8192;
+our $WarningPrefix = "W: ";
+our $ErrorPrefix = "E: ";
 
 has 'output_level' => (
     is => 'ro',
@@ -55,6 +58,18 @@ has 'builder_stack' => (
     is => 'ro',
     isa => 'ArrayRef',
     default => sub{[]},
+    writer => '_write_builder_stack',
+);
+
+has 'filter' => (
+    is => 'ro',
+    does => 'BuildFilter',
+    writer => '_write_filter',
+);
+
+has 'colorize' => (
+    is => 'rw',
+    isa => 'Bool',
 );
 
 sub open_log_file
@@ -70,7 +85,7 @@ sub builder_init
 {
     my ($self, $pkg, $opts) = @_;
     require $pkg . ".pm";
-    $self->filter($pkg->new(options => $opts));
+    $self->_write_builder_stack([$pkg->new(options => $opts)]);
 }
 
 sub get_build_cmd
@@ -88,15 +103,26 @@ sub log_init
         if(exists $opts->{log_file});
 }
 
+sub pr 
+{
+    my ($self, $color, $prefix, @strs) = @_;
+
+    print $color if $self->colorize and defined $color;
+    print $prefix if defined $prefix;
+    print @strs;
+    if (index($strs[$#strs-1], "\n") == -1) {
+        print "\n";
+    }
+    print RESET if $self->colorize;
+
+}
 sub pr_err
 {
     my ($self, @strs) = @_;
-    print RED;
-    print "E: ", @strs;
-    if (not $strs[$#strs-1] =~ /\n/) {
-        print "\n";
-    }
-    print RESET;
+    $self->pr(
+        RED,
+        $ErrorPrefix,
+        @strs);
     1;
 }
 
@@ -104,17 +130,33 @@ sub pr_verbose
 {
     my ($self, @strs) = @_;
     return 1 if ($self->output_level < VERBOSE);
-    print @strs;
+    $self->pr(
+        undef,
+        undef,
+        @strs);
     1;
 }
+
+sub pr_success 
+{
+    my ($self, @strs) = @_;
+
+    $self->pr(
+        GREEN,
+        undef,
+        @strs);
+    1;
+}
+
 
 sub pr_warn
 {
     my ($self, @strs) = @_;
     return 1 if($self->output_level < WARN);
-    print YELLOW;
-    print "W: ", @strs;
-    print RESET;
+    $self->pr(
+        YELLOW,
+        $WarningPrefix,
+        @strs);
     1;
 }
 
@@ -126,12 +168,14 @@ sub run
     (
         $opts{builder},
         $opts{build_options},
-        $opts{opts}
+        $opts{opts},
     );
 
     BuildRunner::Error->throw({
             message => "Undefined builder"})
         if not defined $builder;
+
+    $self->colorize($opts{colorize});
     $self->builder_init($builder, $opts_h);
     $self->log_init($opts_h);
 
@@ -144,28 +188,62 @@ sub run
     
     1
 }
+
+=head
+    $s->get_next_build_command
+returns an execable build command, the whole damn thing.
+
+THere is a stack of build command objects since a build filter can
+return to you another build filter, ex:
+
+[ <autoreconf build filter>, <Configure build filter>, <Make build filter> ].
+
+Then we take the 0th element, and:
+1. ) If it is a string
+    shift it off
+    return that command (it will be executed)
+2. ) If it is not a string
+    assert that it is a BuildFIlter reference
+    unshift it's command onto the queue by calling it's next_build_command method
+        (this may be undef and willl be taken care of in (3))
+    set the current filter object to this filter.
+    call self again
+3. ) If it is undef
+    shift off the queue
+    call self again.
+(*bad*)
+
+=cut
+
 sub get_next_build_command {
     my ($self) = @_;
 
-    my $builder = $self->builder_stack()->[0]
+    if (not @{$self->builder_stack}) {
+        return undef;
+    }
 
-    if (blessed($builder)) {
-        my $cmd = undef;
-        BuildRunnner::Error->throw({
-                message => "builder $builder is not a BuildRunner"});
-        $cmd = $builder->next_build_command;
-        if($cmd) {
-            return $cmd;
-        }
-        else {
-            pop @{$self->builder_stack};
-            return $self->get_next_build_command;
-        }
+    my $builder = $self->builder_stack()->[0];
+
+    if (not(blessed($builder)) and (ref $builder eq '')) {
+        return shift @{$self->builder_stack};
+    }
+    elsif(blessed($builder) and $builder->does('BuildFilter')) {
+        my $cmd = $self->builder_stack->[0]->next_build_command();
+        unshift @{$self->builder_stack}, $cmd;
+        $self->_write_filter($builder);
+        return $self->get_next_build_command;
+    }
+    elsif(not defined $builder) {
+        shift @{$self->builder_stack};
+        return $self->get_next_build_command;
     }
     else {
-        return pop @{$self->builder_stack};
+        BuildRunner::Error->throw({
+                message => "Bad builder object or string: $builder"});
     }
+    return;
 }
+
 
 sub run_command {
     my ($self, $build_cmd) = @_;
@@ -231,6 +309,11 @@ sub run_command {
     if ($exit_code != 0) {
         $self->pr_err("Failure: exit code: " . $exit_code);
         return undef;
+    }
+    else {
+        $self->pr_success("Build '" 
+            . ($self->filter->name // '(undefined)') 
+            . "' succeeded, code 0");
     }
 
     1;

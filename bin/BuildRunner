@@ -3,6 +3,7 @@ use v5.20;
 use warnings;
 use strict;
 use BuildRunner;
+use Getopt::Long;
 
 my $b = BuildRunner->new;
 my @builders = (
@@ -10,21 +11,42 @@ my @builders = (
     'MakeBuildFilter',
 );
 
-my ($builder, $builder_opts) = (undef, {});
 
-foreach my $_builder (@builders) {
-    require $_builder . ".pm";
-    if ($_builder->will_run) {
-        $builder = $_builder;
-        last;
+my $colorize = (-t STDOUT) ? 1 : 0;
+my $builder = undef;
+
+GetOptions(
+    "builder=s" => \$builder,
+    "colorize=i" => \$colorize)
+    or die "Can't parse command line: " . join " ", @ARGV;
+
+if (not defined $builder) { 
+    foreach my $_builder (@builders) {
+        require $_builder . ".pm";
+        if ($_builder->will_run) {
+            $builder = $_builder;
+            last;
+        }
+    }
+    if (not defined $builder) {
+        die "Couldn't find a builder for this directory";
+    }
+}
+else {
+    require $builder . ".pm";
+    if (not $builder->will_run) {
+        die "Builder $builder won't run this directory";
     }
 }
 
-$b->run(builder=>$builder,
-        opts=>{
-            log_file => "./hello.log",
-            output_level => BuildRunner::VERBOSE,
-            color => 1,
-            cmdline => [@ARGV],
-        }
-    );
+
+$b->run(
+    builder=>$builder,
+    colorize => $colorize,
+    opts=>{
+        log_file => "./hello.log",
+        output_level => BuildRunner::WARN,
+        color => 1,
+        cmdline => [@ARGV],
+    }
+);

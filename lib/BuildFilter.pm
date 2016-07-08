@@ -6,18 +6,20 @@ use warnings;
 use Moose::Role;
 
 
-has 'build_binary_sequence' => (
+has 'build_sequence' => (
     is => 'ro',
-    isa => 'ArrayRef[Str]',
+    isa => 'ArrayRef',
     default => sub {[]},
-    writer => '_write_build_binary_sequence',
+    writer => '_write_build_sequence',
 );
 
-has 'cmdline' => (
+has 'name' => (
     is => 'ro',
-    isa => 'ArrayRef[Str]',
-    default => sub {[]},
+    isa => 'Str',
+    default => '',
+    writer => '_write_name',
 );
+
 
 
 requires 'filter_line';

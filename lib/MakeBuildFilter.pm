@@ -24,7 +24,8 @@ sub BUILD {
     }
     $cmd .= " " .  join " ", @{$self->options->{cmdline}}
         if defined $self->options and exists $self->options->{cmdline};
-    $self->_write_build_binary_sequence([$cmd]);
+    $self->_write_build_sequence([$cmd]);
+    $self->_write_name("make");
 }
 
 sub will_run {
@@ -55,8 +56,8 @@ sub filter_line {
 
 sub next_build_command {
     my ($self) = @_;
-    if (@{$self->build_binary_sequence}) {
-        return shift @{$self->build_binary_sequence};
+    if (@{$self->build_sequence}) {
+        return shift @{$self->build_sequence};
     }
     return;
 };

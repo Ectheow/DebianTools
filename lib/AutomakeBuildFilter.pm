@@ -1,5 +1,6 @@
 package AutomakeBuildFilter;
 use BuildRunner;
+use MakeBuildFilter;
 use IPC::Cmd qw[can_run];
 use Moose;
 
@@ -13,13 +14,14 @@ has '_make_filter' => (
 sub BUILD {
     my ($self) = @_;
 
-
-    if (not -x "configure") {
-        push @{$self->build_binary_sequence}, "autoreconf -i";
+    if (not -x "./configure") {
+        push @{$self->build_sequence}, "autoreconf -i";
     }
+    push @{$self->build_sequence}, "./configure";
+    push @{$self->build_sequence}, MakeBuildFilter->new;
+    $self->_write_name("automake");
 
-    push @{$self->build_binary_sequence}, "./configure";
-    push @{$self->build_binary_sequence}, MakeBuildFilter->new;
+    1;
 }
 
 sub will_run {
@@ -28,13 +30,19 @@ sub will_run {
 
 sub filter_line {
     my ($self, $line) = @_;
+    if ($line =~ m/error:/i) {
+        return ($line, BuildRunner::ERROR);
+    }
+    elsif($line =~ m/warn(ing)?:/i) {
+        return ($line, BuildRunner::WARN);
+    }
     return ($line, BuildRunner::VERBOSE);
 }
 
 sub next_build_command {
     my ($self) = @_;
-    if (@{$self->build_binary_sequence}) {
-        return shift @{$self->build_binary_sequence};
+    if (@{$self->build_sequence}) {
+        return shift @{$self->build_sequence};
     }
     return;
 }
